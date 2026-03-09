@@ -20,3 +20,11 @@ Set-ItemProperty -Path "HKCU:\Software\Typora" -Name "IDate" -Value "3/9/2099"
 1. 找到 **`Typora\resources\page-dist\static\js\LicenseIndex.{id}.js`** 
 
 2. 修改 **`e.hasActivated="true"==e.hasActivated`** 为 **`e.hasActivated="true"=="true"`**
+
+---
+
+# 0x03 参考
+
+[https://blog.csdn.net/qq_25828905/article/details/148843115](https://blog.csdn.net/qq_25828905/article/details/148843115)
+
+[https://www.cnblogs.com/jerrycyx/p/archive/2025/05/26](https://www.cnblogs.com/jerrycyx/p/archive/2025/05/26)
