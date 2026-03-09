@@ -2,8 +2,6 @@
 
 下载链接：[https://downloads.typora.io/windows/typora-setup-x64-1.10.8.exe](https://downloads.typora.io/windows/typora-setup-x64-1.10.8.exe)
 
----
-
 # 0x02 破解
 
 ## 方案一：修改注册表突破使用试用时长
@@ -20,8 +18,6 @@ Set-ItemProperty -Path "HKCU:\Software\Typora" -Name "IDate" -Value "3/9/2099"
 1. 找到 **`Typora\resources\page-dist\static\js\LicenseIndex.{id}.js`** 
 
 2. 修改 **`e.hasActivated="true"==e.hasActivated`** 为 **`e.hasActivated="true"=="true"`**
-
----
 
 # 0x03 参考
 
