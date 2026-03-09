@@ -161,7 +161,7 @@ AAA<--SNIP 232 A-->AAA.php.png
 
 由于 Jetty 会自动处理 `*.xml` 和 `*.war` ，所以当服务器允许上传一个 `*.xml` 文件到 `$JETTY_BASE/webapps/` 时，我们将会获得一个 RCE。
 
-![Jetty-RCE](C:\Users\Hea\Documents\朝花夕拾\Web_Security\File Upload\assets\Jetty-RCE.png)
+![Jetty-RCE](.\assets\Jetty-RCE.png)
 
 ---
 
