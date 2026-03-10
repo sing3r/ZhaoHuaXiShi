@@ -154,6 +154,8 @@ X-Forwarded-Scheme: http
 
 ```
 
+---
+
 ### 3.1.2 基础攻击向量三：`X-Host` 
 
 **`X-Host`** 头可能被用作 **加载 JS 资源的域名**
@@ -166,7 +168,7 @@ X-Host: attacker.com
 
 ```
 
-
+---
 
 ### 3.1.3 案例一：HackOne host spoofing
 
@@ -179,6 +181,8 @@ X-Forwarded-Host: evil.com
 
 ```
 
+---
+
 ### 3.1.4 案例二：HackOne scheme spoofing
 
 HackOne 后端信任 `X-Forwarded-Scheme`来决定是否强制使用 HTTPS，设置`X-Forwarded-Scheme: http`，由于后端强制使用 HTTPS 的关系，可触发 301 转跳。
@@ -189,6 +193,8 @@ Host: hackerone.com
 X-Forwarded-Scheme: http
 
 ```
+
+---
 
 ### 3.15. 案例三：Red Hat Open Graph meta poisoning
 
@@ -203,7 +209,7 @@ X-Forwarded-Host: a."?><script>alert(1)</script>
 
 ```
 
-
+---
 
 ### 3.2 **内容处理滥用**
 
