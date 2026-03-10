@@ -117,19 +117,21 @@
 
 ---
 
-# 0x03 基础攻击向量
+# 0x03 Web Cache Poisoning (缓存投毒) 攻击
 
-## 3.1 **基础头部反射 (Header Reflection)**
+### 3.1 基础攻击向量
+
+#### 3.1.1  **基础头部反射 (Header Reflection)**
 
 - **X-Forwarded-Host**: 用于模板化重定向或规范 URL。如 HackerOne 案例，通过该 Header 强制缓存存储指向恶意域名的 301 重定向。
 - **X-Forwarded-Scheme**: 干扰 HTTPS 强制跳转逻辑，造成重定向死循环或降级攻击。
 - **X-Host**：可能被用于加载某些静态资源，如 JS 资源
 
-**Header 字典**：[header.txt](./assets/header.txt)
+- **其他头部**：[Header 字典](./assets/header.txt)
 
 ---
 
-### 3.1.1 基础攻击向量一：`X-Forwarded-Host`
+#### 3.1.1.1 基础攻击向量一：`X-Forwarded-Host`
 
 `X-Forwarded-Host` 触发 `301` 转跳，缓存服务器缓存 301 响应。对`/assets/main.js` 请求将会被替换攻击者控制的内容。
 
@@ -142,7 +144,7 @@ X-Forwarded-Host: attacker.com
 
 ---
 
-### 3.1.2 基础攻击向量二：`X-Forwarded-Host` + `X-Forwarded-Scheme`
+#### 3.1.1.2 基础攻击向量二：`X-Forwarded-Host` + `X-Forwarded-Scheme`
 
 将 `X-Forwarded-Scheme` 设置为 `http`，由于服务器会将所有 `HTTP` 请求重定向到 HTTPS，在重定向时使用 `X-Forwarded-Host` 作为重定向的域名，缓存服务器缓存了指向恶意地址的 `301` 响应。
 
@@ -156,7 +158,7 @@ X-Forwarded-Scheme: http
 
 ---
 
-### 3.1.2 基础攻击向量三：`X-Host` 
+#### 3.1.1.3 基础攻击向量三：`X-Host` 
 
 **`X-Host`** 头可能被用作 **加载 JS 资源的域名**
 
@@ -170,7 +172,7 @@ X-Host: attacker.com
 
 ---
 
-### 3.1.3 案例一：HackOne host spoofing
+#### 3.1.1.4 案例一：HackOne host spoofing
 
 HackOne 后端使用 `X-Forwarded-Host`进行重定向和规范 URL，但缓存键仅使用了 `Host` 头，因此单个响应就毒害了所有访问 `/` 的访客。
 
@@ -183,7 +185,7 @@ X-Forwarded-Host: evil.com
 
 ---
 
-### 3.1.4 案例二：HackOne scheme spoofing
+#### 3.1.1.5 案例二：HackOne scheme spoofing
 
 HackOne 后端信任 `X-Forwarded-Scheme`来决定是否强制使用 HTTPS，设置`X-Forwarded-Scheme: http`，由于后端强制使用 HTTPS 的关系，可触发 301 转跳。
 
@@ -196,7 +198,7 @@ X-Forwarded-Scheme: http
 
 ---
 
-### 3.15. 案例三：Red Hat Open Graph meta poisoning
+#### 3.1.1.6 案例三：Red Hat Open Graph meta poisoning
 
 1. Red Hat 的页面在生成 HTML 时，会为了 SEO 或社交分享的需求，动态构建 Open Graph 标记（例如 `<meta property="og:url" content="...">`）。
 2. 服务器后端错误地信任了 `X-Forwarded-Host` 头部。攻击者传入 `a."?><script>alert(1)</script>`，后端会未加过滤地将其拼接到 HTML 标签中。
@@ -211,35 +213,63 @@ X-Forwarded-Host: a."?><script>alert(1)</script>
 
 ---
 
-### 3.2 **内容处理滥用**
+### 3.1.2 **内容处理滥用**
 
 - **Content-Type 注入**: 注入非法 Content-Type 触发后端 400 错误，若缓存未校验状态码，会导致页面全局 DoS（如 GitHub 案例）。
 - **Method Override**: 利用 `X-HTTP-Method-Override: HEAD` 诱导缓存存储 Content-Length 为 0 的空响应（如 GitLab 案例）。
 
-## 3.3 **底层解析差异**
+---
 
-- **URL 规范化差异**: CDN 不解码 `%2F` 但后端解码，通过 `/share/%2F..%2Fapi/auth/session` 将敏感 API 响应诱骗至缓存目录（如 ChatGPT 案例）。
-- **大小写混淆**: Cloudflare 等 CDN 规范化 Host 为小写进行缓存，但转发至后端时保持原样，利用后端对 `Host: TaRgEt.CoM` 的特殊处理实现投毒。
+#### 3.1.2.1 案例一：GitHub `Content-Type`异常导致 `400` 响应
 
-`X-Forwarded-Host`
+该案例只要针对匿名用户：
+
+- **已登录用户（Authenticated）：** 为了安全和个性化，缓存键通常会包含 Session ID 或 Cookie。这意味着每个人的缓存都是隔离的。
+- **未登录用户（Anonymous）：** 为了性能，所有匿名用户共享同一个缓存键。
+
+攻击过程：
+
+1. 通过 `PURGE` 请求方法清除健康缓存
+
+   ```bash
+   curl -X PURGE https://github.com/user/repo
+   ```
+
+2. 构造异常的 `Content-Type`出发 `400` 错误，缓存服务器缓存 `400` 响应。
+
+    ```bash
+    curl -H "Content-Type: invalid-value" https://github.com/user/repo
+    ```
 
 ---
 
-## 3.2 多头部协同攻击
+#### 3.1.2.2 案例二：GitLab`X-HTTP-Method-Override`方法覆盖
+
+GitLab 从 Google Cloud Storage 提供静态 bundle。Google Cloud Storage 遵从通过 `X-HTTP-Method-Override`指示将 `GET` 覆盖为 `HEAD` ，导致返回空响应并被缓存服务器存储。
 
 ```http
-GET /assets/app.js HTTP/1.1
-Host: target.com
-X-Forwarded-Host: attacker.com
-X-Forwarded-Scheme: http  # 强制 HTTPS 重定向
+GET /static/app.js HTTP/1.1
+Host: gitlab.com
+X-HTTP-Method-Override: HEAD
 
 ```
 
-**原理**：将 `X-Forwarded-Scheme` 设置为 `http`，服务器将所有 `HTTP` 请求重定向到 HTTPS，在重定向时使用 `X-Forwarded-Host` 作为重定向的域名，控制该重定向指向的位置。缓存中毒后导致 JS 资源被劫持
+---
+
+### 3.1.3 **底层解析差异**
+
+- **分隔符/规范化差异**: CDN 不解码 `%2F` 但后端解码，通过 `/share/%2F..%2Fapi/auth/session` 将敏感 API 响应诱骗至缓存目录（如 ChatGPT 案例）。
+- **大小写混淆**: Cloudflare 等 CDN 规范化 Host 为小写进行缓存，但转发至后端时保持原样，利用后端对 `Host: TaRgEt.CoM` 的特殊处理实现投毒。
 
 ---
 
-## 3.3 参数伪装(Param Cloaking)
+#### 3.1.3.1 攻击向量一：分隔符/URL 规范化差异
+
+##### 分隔符差异
+
+Ruby 等支持`;`分隔参数的服务器，可将非缓存键参数隐藏在合法参数内。
+
+Portswigger lab: [https://portswigger.net/web-security/web-cache-poisoning/exploiting-implementation-flaws/lab-web-cache-poisoning-param-cloaking](https://portswigger.net/web-security/web-cache-poisoning/exploiting-implementation-flaws/lab-web-cache-poisoning-param-cloaking)
 
 ```http
 GET /page.php?param=value;malicious=value HTTP/1.1
@@ -247,11 +277,43 @@ Host: target.com
 
 ```
 
-**适用场景**：Ruby 等支持`;`分隔参数的服务器，可将非缓存键参数隐藏在合法参数内。
+---
 
-Portswigger lab: [https://portswigger.net/web-security/web-cache-poisoning/exploiting-implementation-flaws/lab-web-cache-poisoning-param-cloaking](https://portswigger.net/web-security/web-cache-poisoning/exploiting-implementation-flaws/lab-web-cache-poisoning-param-cloaking)
+##### URL 规范化差异
 
-## 3.4 Fat GET
+- CDN 会缓存特定目录下的所有内容，如：`/share/`
+- CDN 不会解码或规范化 `%2F..%2F`，因此它可以被用作 **path traversal to access other sensitive locations that will be cached**，例如 `https://chat.openai.com/share/%2F..%2Fapi/auth/session?cachebuster=123`
+- Web server 会解码并规范化 `%2F..%2F`，并会返回 `/api/auth/session`，该响应 **contains the auth token**。
+
+> 更多详见：[URL 路径解析差异](./URL 路径解析差异.md)
+
+---
+
+#### 3.1.3.2 攻击向量二：大小写混淆
+
+通过 `Host` 大小写混淆，导致 **CDN 层**和**源站层**出现解析差异。源站层可能返回 400 响应或其他响应，致使缓存被污染。
+
+著名案例：**Cloudflare** 
+
+- **Cloudflare (CDN 层)：** 为了提高缓存命中率，它会对 `Host` 头进行**规范化（Normalization）**处理。无论你发送 `TaRgEt.CoM` 还是 `target.com`，Cloudflare 都会将其视为同一个缓存键（Cache Key），并指向同一个缓存桶（Cache Bucket）。
+
+- **Origin (源站层)：** 源站（如 Nginx、Apache 或后端应用框架）在接收请求时，可能会直接读取 **原始（Raw）** 的 Header。如果程序员在代码中使用了类似 `if (request.headers['Host'] == 'target.com')` 这种大小写敏感的判断，逻辑就会出现偏差。
+
+---
+
+## 3.2 高级攻击变种
+
+### 3.2.1 **参数操纵 (Parameter Manipulation)**
+
+- **Fat GET**: 在 GET 请求的 Body 中携带参数。若缓存仅看 URL 而后端优先看 Body，可导致缓存响应被参数污染。
+
+---
+
+#### 3.2.1.1 攻击向量一：Fat GET
+
+服务器使用 Body 中的参数，但缓存系统仅依据 URL 缓存
+
+Portswigger lab: [https://portswigger.net/web-security/web-cache-poisoning/exploiting-implementation-flaws/lab-web-cache-poisoning-fat-get](https://portswigger.net/web-security/web-cache-poisoning/exploiting-implementation-flaws/lab-web-cache-poisoning-fat-get)
 
 ```http
 GET /contact/report-abuse?report=albinowax HTTP/1.1
@@ -263,13 +325,76 @@ report=innocent-victim  # 服务器使用此值，缓存使用URL中的值
 
 ```
 
-**原理**：服务器使用 Body 中的参数，但缓存系统仅依据 URL 缓存
+---
 
-Portswigger lab: [https://portswigger.net/web-security/web-cache-poisoning/exploiting-implementation-flaws/lab-web-cache-poisoning-fat-get](https://portswigger.net/web-security/web-cache-poisoning/exploiting-implementation-flaws/lab-web-cache-poisoning-fat-get)
+### 3.2.2 **复合型利用**
+
+- **并行请求播种 (Cache Seeding)**：针对 User-Agent 反射，通过单包并行发送恶意 UA 请求与正常请求，利用竞争条件污染 HTML 缓存。
+- **Sitecore XAML 投毒**: 利用特定的 XAML 处理程序 `AddToCache` 实现未授权的 HtmlCache 写入。
+- **Request Smuggling 结合**: 利用走私漏洞将恶意响应“对齐”到下一个正常用户的缓存键上。
 
 ---
 
-## 3.5 协同请求走私攻击
+#### 3.2.2.1 攻击向量一：并行请求播种 (Cache Seeding)
+
+1. 存在一个 **Header 反射**，能够触发 XSS 攻击
+2. CDN 自动缓存 URL 以`.js` 结尾的响应
+3. 通过 Single-packet attack 触发条件竞争
+   - **请求 A**：`GET /index.php/.js` (带恶意 UA)
+   - **请求 B**：`GET /` (正常请求)
+
+极端高并发下，CDN 内部的缓存处理逻辑可能会发生如下“事故”：
+
+1. CDN 接收到请求 A，由于后缀是 `.js`，它标记该请求为“可缓存的”。
+2. 与此同时，请求 B 到达，CDN 识别出这对应主页 `/`。
+3. **竞争发生**：如果 CDN 的并发控制机制不够健壮，它可能会将请求 A（带毒）从源站拿回的响应，错误地填入到请求 B（主页）所指向的缓存槽位
+
+```http
+GET /script.js HTTP/1.1
+Host: cdn.target.com
+User-Agent: "><script>stealCookies()</script>
+
+```
+
+
+
+---
+
+#### 3.2.2.2 攻击向量二：Sitecore XAML 投毒
+
+与之前讨论的利用 CDN 机制的“被动”投毒不同，这个漏洞是直接利用了 Sitecore 框架内部的一个**未授权（Pre-auth）远程过程调用（RPC）**，强行把恶意数据“写”进服务器的内存缓存中。
+
+我们可以从以下四个维度来拆解这个攻击链：
+
+------
+
+##### 1. 攻击入口：XAML 处理器 (The Pre-auth Entry)
+
+Sitecore 作为一个复杂的 CMS 框架，为了支持后台 UI 交互，提供了一些特殊的 Handler。
+
+- **漏洞点**：`/-/xaml/Sitecore.Shell.Xaml.WebControl`。
+- **特性**：这个接口原本是给管理员后台（Shell）使用的，但开发者在配置时，允许了**未授权访问**（Pre-auth）。这意味着任何人（甚至匿名用户）都能向这个接口发送 POST 请求。
+
+##### 2. 漏洞原语：不安全的反射调用 (The Insecure Reflection)
+
+这是该漏洞最精彩的部分。Sitecore 的 `AjaxScriptManager` 允许通过 HTTP 参数触发后端组件的方法。
+
+- **触发逻辑**：当请求中包含 `__ISEVENT=1` 且指定了 `__SOURCE`（即特定的控制 ID）时，Sitecore 的逻辑会尝试在对应的 WebControl 对象上执行 `__PARAMETERS` 中定义的方法。
+- **利用点**：攻击者发现 `GlobalHeader` 控件继承自 `WebControl`，而 `WebControl` 内部刚好有一个名为 **`AddToCache`** 的公共方法。
+
+##### 3. 精确投毒：手动构建 Cache Key
+
+在普通的缓存污染中，我们只能寄希望于 CDN 按照它的规则去存。但在 Sitecore 这个漏洞里，你是**主动写入者**：
+
+- **`AddToCache("key", "value")`**：
+  - **key**：这是你想要投毒的目标页面的缓存键。攻击者需要通过研究 Sitecore 的源码，推导出目标页面（如登录页或首页）生成的 Cache Key 算法。
+  - **value**：你想要注入的恶意 HTML 代码（例如一个伪造的登录表单，或者一段窃取凭据的 JS）。
+
+---
+
+#### 3.2.2.3 攻击向量三：Request Smuggling 结合
+
+`/post/next?postId=3`会触发重定向，并使用 `Host: attacker.net` 作为重定向的目标。发送请求走私攻击后立刻访问某个静态资源，如：`/static/include.js`。随后，对 `/static/include.js` 的任何请求都会返回 `302` 重定向，获取缓存的攻击者脚本内容。
 
 ```http
 POST / HTTP/1.1
@@ -289,63 +414,31 @@ Content-Length: 10
 x=1
 ```
 
-**原理**：`/post/next?postId=3`会触发重定向，并使用 `Host: attacker.net` 作为重定向的目标。发送请求走私攻击后立刻访问某个静态资源，如：`/static/include.js`。随后，对 `/static/include.js` 的任何请求都会返回 `302` 重定向，获取缓存的攻击者脚本内容。
-
 ---
 
-## 3.5 标头反射 XSS + CDN 缓存播种
 
-```http
-GET /script.js HTTP/1.1
-Host: cdn.target.com
-User-Agent: "><script>stealCookies()</script>
 
-```
+# 0x04 Web Cache Deception (缓存欺骗)攻击
 
-**高级技巧**：
+## 1. 路径混淆技巧 (Path Confusion)
 
-1. 并行发送两请求：`.js`路径 + 主页
-2. CDN将恶意UA"播种"到主HTML缓存
-3. 利用CDN静态资源自动缓存特性扩大影响
+- **扩展名欺骗**: 在动态接口后添加静态后缀，如 `/profile.php/nonexistent.css`。
+- **分隔符变体**:
+  - 使用 `;` 绕过：`/profile.php;admin.js`。
+  - 使用 URL 编码绕过：`/profile.php%2f..%2fsecret.js`。
+- **冷门扩展名**: 测试 `.avif`、`.webp`、`.woff2` 等 CDN 可能默认缓存但安全策略未覆盖的格式。
 
----
+## 2. 高级复合攻击
 
-## 3.6 路径遍历缓存中毒
+- **CSPT 辅助攻击 (Client-Side Path Traversal)**:
+  - 在 SPA（单页面应用）中，利用客户端路径穿越让前端脚本向 `/v1/token.css` 发起带认证头的请求。
+  - CDN 因后缀名缓存该响应，攻击者随后通过公共链接提取受害者 Token。
 
-```http
-GET /share/%2F..%2Fapi/auth/session HTTP/1.1
-Host: chat.openai.com
+# 0x05 工具
 
-```
-
-**ChatGPT案例**：
-
-- CDN缓存`/share/*`且不规范URL
-- 服务器规范化后返回`/api/auth/session`(含敏感token)
-- 攻击者通过缓存获取他人会话
-
-### 3.1.2 **Cookie 投毒**
-
-如果 Cookie 内容被反射到页面且未入键，可实现针对特定 Session 的 XSS。
-
-```http
-GET / HTTP/1.1
-Host: vulnerable.com
-Cookie: session=VftzO7ZtiBj5zNLRAuFpXpSQLjS4lBmU; fehost=asd"%2balert(1)%2b"
-
-```
-
-****：在 GET 请求的 Body 中携带参数，若后端优先解析 Body 但缓存服务器只根据 URL 缓存，可导致参数污染。Portswigger lab Fat GET 相关实验：[https://portswigger.net/web-security/web-cache-poisoning/exploiting-implementation-flaws/lab-web-cache-poisoning-fat-get](https://portswigger.net/web-security/web-cache-poisoning/exploiting-implementation-flaws/lab-web-cache-poisoning-fat-get)
-
-```http
-GET /contact/report-abuse?report=albinowax HTTP/1.1
-Host: github.com
-Content-Type: application/x-www-form-urlencoded
-Content-Length: 22
-
-report=innocent-victim
-
-```
-
-**HTTP 请求走私结合**：通过走私手段将下一个用户的请求“嫁接”到攻击者构造的响应上。
-
+| **分类** | **工具名称**        | **实战用途**                                  |
+| -------- | ------------------- | --------------------------------------------- |
+| **发现** | **Param Miner**     | Burp 插件，自动探测隐藏的未键入 Header 和参数 |
+| **综合** | **WCVS**            | 自动检测 Web 缓存投毒与欺骗的扫描器           |
+| **欺骗** | **CacheDecepHound** | 专门针对缓存欺骗路径混淆的探测工具            |
+| **注入** | **toxicache**       | Go 编写的批量缓存漏洞扫描器                   |
