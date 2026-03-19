@@ -39,7 +39,7 @@
 
 ------
 
-# 0x02 Web Cache Poisoning (缓存投毒) 实施步骤
+# 0x02 Web Cache Poisoning (缓存投毒)/Web Cache Deception (缓存欺骗)实施步骤
 
 ## 第一阶段：识别缓存机制
 
@@ -119,9 +119,9 @@
 
 # 0x03 Web Cache Poisoning (缓存投毒) 攻击
 
-### 3.1 基础攻击向量
+## 3.1 基础攻击向量
 
-#### 3.1.1  **基础头部反射 (Header Reflection)**
+### 3.1.1  **基础头部反射 (Header Reflection)**
 
 - **X-Forwarded-Host**: 用于模板化重定向或规范 URL。如 HackerOne 案例，通过该 Header 强制缓存存储指向恶意域名的 301 重定向。
 - **X-Forwarded-Scheme**: 干扰 HTTPS 强制跳转逻辑，造成重定向死循环或降级攻击。
