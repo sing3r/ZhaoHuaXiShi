@@ -7,8 +7,9 @@
 ## 1.1 理论基础
 
 1. [**RFC 规范 (2161)**](https://tools.ietf.org/html/rfc2616)
+   
    1. 如果收到的消息同时包含 `Transfer-Encoding` 头字段和 `Content-Length` 头字段，则后者必须被忽略。
-
+   
 2. **Content-Length**
    1.  `Content-Length` 实体头指示发送给接收者的实体主体的大小（以字节为单位）。
    2.  `Content-Length` 实体头的指示包括不可见字符，即不可见字符也要求被计算字节长度。如 `name=admin\r\n`，`CL = 12`
@@ -646,7 +647,7 @@ a=x
 
 相反，在TE.CL攻击中，初始的`POST`请求使用`Transfer-Encoding: chunked`，而后续的嵌入请求则基于`Content-Length`头进行处理。与CL.TE攻击类似，前端代理忽视了被隐藏的`GET /admin`请求，意外地授予了对受限`/admin`路径的访问。
 
-## 5.2 揭示前端请求重写 <a href="#revealing-front-end-request-rewriting" id="revealing-front-end-request-rewriting"></a>
+## 5.2 揭示前端请求重写
 
 应用程序通常使用**前端服务器**来修改传入请求，然后将其传递给后端服务器。典型的修改涉及添加头部，例如`X-Forwarded-For: <IP of the client>`，以将客户端的IP转发给后端。理解这些修改可能至关重要，因为它可能揭示**绕过保护**或**发现隐藏的信息或端点**的方法。
 
@@ -675,7 +676,7 @@ search=
 
 此方法主要用于理解前端代理所做的请求修改，基本上进行自我导向的调查。
 
-## 5.3 捕获其他用户的请求 <a href="#capturing-other-users-requests" id="capturing-other-users-requests"></a>
+## 5.3 捕获其他用户的请求
 
 通过在 POST 操作期间将特定请求附加为参数的值，可以捕获下一个用户的请求。以下是如何实现这一点的：
 
@@ -750,7 +751,7 @@ A=
 
 在 [**这篇文章**](https://mizu.re/post/twisty-python) 中，这被滥用通过请求走私和一个 **会回复用户输入的易受攻击端点** 来走私一个 HTTP/0.9 请求。响应中反射的参数包含一个 **伪造的 HTTP/1.1 响应（带有头部和主体）**，因此响应将包含有效的可执行 JS 代码，`Content-Type` 为 `text/html`。
 
-## 5.5 利用 HTTP 请求走私进行站内重定向 <a href="#exploiting-on-site-redirects-with-http-request-smuggling" id="exploiting-on-site-redirects-with-http-request-smuggling"></a>
+## 5.5 利用 HTTP 请求走私进行站内重定向
 
 应用程序通常通过使用重定向 URL 中的 `Host` 头部的主机名从一个 URL 重定向到另一个 URL。这在像 Apache 和 IIS 这样的 web 服务器中很常见。例如，请求一个没有尾部斜杠的文件夹会导致重定向以包含斜杠：
 ```http
@@ -790,7 +791,7 @@ Location: https://attacker-website.com/home/
 ```
 在这个场景中，用户对 JavaScript 文件的请求被劫持。攻击者可以通过响应恶意 JavaScript 来潜在地危害用户。
 
-## 5.6 通过 HTTP 请求走私利用 Web 缓存中毒 <a href="#exploiting-web-cache-poisoning-via-http-request-smuggling" id="exploiting-web-cache-poisoning-via-http-request-smuggling"></a>
+## 5.6 通过 HTTP 请求走私利用 Web 缓存中毒
 
 如果 **前端基础设施的任何组件缓存内容**，通常是为了提高性能，则可以执行 Web 缓存中毒。通过操纵服务器的响应，可以 **毒化缓存**。
 
@@ -822,7 +823,7 @@ x=1
 
 随后，任何对 `/static/include.js` 的请求将提供攻击者脚本的缓存内容，有效地发起广泛的 XSS 攻击。
 
-## 5.7 使用 HTTP request smuggling 执行 web cache deception <a href="#using-http-request-smuggling-to-perform-web-cache-deception" id="using-http-request-smuggling-to-perform-web-cache-deception"></a>
+## 5.7 使用 HTTP request smuggling 执行 web cache deception
 
 > **web cache poisoning 和 web cache deception 之间有什么区别？**
 >
@@ -846,7 +847,7 @@ Foo: X
 
 如果这个走私请求污染了用于静态内容的缓存条目（例如，`/someimage.png`），那么受害者在`/private/messages`中的敏感数据可能会被缓存到静态内容的缓存条目下。因此，攻击者可能会检索到这些缓存的敏感数据。
 
-## 5.8 通过 HTTP 请求走私滥用 TRACE <a href="#abusing-trace-via-http-request-smuggling" id="abusing-trace-via-http-request-smuggling"></a> 
+## 5.8 通过 HTTP 请求走私滥用 TRACE
 
 [**在这篇文章中**](https://portswigger.net/research/trace-desync-attack) 建议如果服务器启用了 TRACE 方法，可能会通过 HTTP 请求走私进行滥用。这是因为该方法会将发送到服务器的任何头部反射为响应体的一部分。例如：
 - `TRACE` 请求
@@ -901,7 +902,7 @@ SomeHeader: <script>alert("reflected")</script>
 Other: aaaaaa….
 ```
 
-## 5.9 通过 HTTP 响应拆分滥用 TRACE <a href="#abusing-trace-via-http-response-splitting" id="abusing-trace-via-http-response-splitting"></a>
+## 5.9 通过 HTTP 响应拆分滥用 TRACE
 
 继续关注[**这篇文章**](https://portswigger.net/research/trace-desync-attack)，作者设想了一种情况：攻击者可以拆分一个响应，从而创建一个任意构造的 HTTP 响应消息，并将其存储在缓存中。
 
