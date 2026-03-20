@@ -644,7 +644,11 @@ ESI + Cache Poisoning：
 
 ------
 
-# 0X05 🛠️ 进阶操作：Burp Suite 自动化
+# 0x05 🛠️ 进阶操作：Burp Suite 自动化
 
 - **插件推荐**：使用 `ESI Injector` 或自定义扫描规则。
 - **Fuzz 列表**：重点关注 `/search`、`/comment` 等用户输入会反射到页面中的位置。
+
+# 0x06  总结
+
+> **ESI 注入 ≠ 模板注入，而是“边缘计算层的 SSRF + 数据窃取 + 响应劫持”综合漏洞。**
