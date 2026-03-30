@@ -1,4 +1,8 @@
-# 0x01 下载 [Typora 1.10.8](https://downloads.typora.io/windows/typora-setup-x64-1.10.8.exe) 
+# 还是用 MarkText 吧!!!
+
+ ---
+
+# 0x01 下载 [Typora 1.10.8](https://downloads.typora.io/windows/typora-setup-x64-1.10.8.exe)
 
 下载链接：[https://downloads.typora.io/windows/typora-setup-x64-1.10.8.exe](https://downloads.typora.io/windows/typora-setup-x64-1.10.8.exe)
 

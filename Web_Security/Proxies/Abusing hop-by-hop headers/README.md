@@ -2,7 +2,7 @@
 
 # 0x01 什么是 hop-by-hop
 
-- **定义：**根据 [RFC 2612 Section 13.5.1](https://datatracker.ietf.org/doc/html/rfc2616#section-13.5.1)，HTTP/1.1 规范默认将以下请求头视为 hop-by-hop 请求头：`Keep-Alive`、`Transfer-Encoding`、`TE`、`Connection`、`Trailer`、`Upgrade`、`Proxy-Authorization` 和 `Proxy-Authenticate`。当代理服务器在请求中遇到这些请求头时，会对其进行处理，且不会将其转发至下一跳节点。
+- **定义：** 根据 [RFC 2612 Section 13.5.1](https://datatracker.ietf.org/doc/html/rfc2616#section-13.5.1)，HTTP/1.1 规范默认将以下请求头视为 hop-by-hop 请求头：`Keep-Alive`、`Transfer-Encoding`、`TE`、`Connection`、`Trailer`、`Upgrade`、`Proxy-Authorization` 和 `Proxy-Authenticate`。当代理服务器在请求中遇到这些请求头时，会对其进行处理，且不会将其转发至下一跳节点。
 
 除了这些默认请求头外，用户也可自定义逐跳请求头。方法是[将请求头的键（key）添加到 `Connection` 请求头的值（value）中](https://datatracker.ietf.org/doc/html/rfc2616#section-14.10)，例如：
 
