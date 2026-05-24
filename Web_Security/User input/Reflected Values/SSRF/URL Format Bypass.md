@@ -382,7 +382,46 @@ HTTPServer(("", int(sys.argv[1])), Redirect).serve_forever()
 
 ---
 
-# 0x09 参考资料
+---
+
+# 0x09 URL 解析器差异实证
+
+## 9.1 主流解析器对比
+
+以下来自 URL 解析混淆研究的实证数据 [Claroty 2022]，展示了同一 URL 在不同语言/库中的解析差异：
+
+| 解析器 | 语言/工具 | 对 `\@` 行为 | 对十进制 IP | 对 Octal IP |
+|--------|-----------|-------------|-------------|-------------|
+| `urllib.parse.urlparse` | Python | RFC 3986 严格模式 | 不支持 | 不支持 |
+| `urllib.parse.urlsplit` | Python | RFC 3986 | 不支持 | 不支持 |
+| `curl` | C | libcurl 行为 | 支持 | 部分支持 |
+| `wget` | C | 较为宽松 | 支持 | 部分支持 |
+| `java.net.URI` | Java | RFC 3986 | 不支持 | 不支持 |
+| `java.net.URL` | Java | 较宽松 | 部分支持 | 不支持 |
+| `UriComponentsBuilder` | Spring | 自定义 (有 `[` bug) | 不支持 | 不支持 |
+| `parse_url()` | PHP | 宽松 | 部分支持 | 部分支持 |
+| `url.parse()` | Node.js | WHATWG 倾向 | 支持 | 不支持 |
+| `net/url.Parse()` | Go | RFC 3986 | 不支持 | 不支持 |
+| `Addressable::URI` | Ruby | RFC 3986 | 不支持 | 不支持 |
+
+> **核心发现**：没有任何两个解析器对所有边缘情况的处理完全一致。这种不一致性是所有 URL 校验绕过技术的根基。
+
+## 9.2 IP 编码参考图
+
+原始研究中的 IP 编码对照图展示了同一下 IP 地址 `173.194.35.35` 在四种编码下的表示：
+
+```
+Hex:      0xAD.0xC2.0x23.0x23 → 0xADC22323
+Octal:    0255.0302.0043.0043 → 0255030200430043  
+Dword:    0xADC22323 → 2915189539
+Decimal:  173.194.35.35 → 2915189539
+```
+
+此对照图验证了 0x02 节中所有 IP 格式变形 Payload 的正确性。
+
+---
+
+# 0x10 参考资料
 
 - [PortSwigger — URL Validation Bypass Cheat Sheet](https://portswigger.net/web-security/ssrf/url-validation-bypass-cheat-sheet)
 - [PortSwigger Research — New Crazy Payloads in URL Validation Bypass](https://portswigger.net/research/new-crazy-payloads-in-the-url-validation-bypass-cheat-sheet)

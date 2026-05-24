@@ -212,6 +212,21 @@ Connection: close
 | Spring Boot | `;` 作为路径首字符 | `GET ;@evil.com/url HTTP/1.1` |
 | PHP Built-in | `*` 在 `/` 之前 | `GET *@0xa9fea9fe/ HTTP/1.1` |
 
+**Spring Boot 典型漏洞代码**：
+
+```java
+@GetMapping("/path")
+throws IOException {
+    String site = "http://ifconfig.me";
+    String uri = request.getRequestURI();
+    URL url = new URL(site + uri.toString());  // ← 路径直接拼接到 URL
+    String response = getSource(url);
+    return response;
+}
+```
+
+攻击者发送 `GET ;@evil.com/url HTTP/1.1` 时，`request.getRequestURI()` 返回 `/;@evil.com/url`，拼接后 `new URL("http://ifconfig.me/;@evil.com/url")` 中 `;` 被 Spring 解析为路径参数分隔符，`@evil.com` 成为实际请求目标。
+
 ---
 
 # 0x05 Blind SSRF
