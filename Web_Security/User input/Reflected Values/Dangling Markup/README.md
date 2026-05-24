@@ -1,4 +1,29 @@
+---
+attack_surface: [注入类, 客户端利用]
+impact: [信息泄露, CSP绕过, 会话劫持, 数据截取]
+risk_level: 高
+prerequisites:
+  - HTML 解析与浏览器容错机制
+  - CSP (内容安全策略) 基础
+  - 同源策略基础
+difficulty: 中级
+related_techniques:
+  - xss-cross-site-scripting
+  - crlf-injection
+  - client-side-template-injection
+  - csp-bypass
+  - xs-leaks
+tools:
+  - CRLFuzz
+  - DomCrawler
+  - Burp Suite
+---
+
 # HTML 悬空标记攻击技术深度指南：无需脚本的内容注入与信息窃取
+
+> 关联文档：[XSS](../XSS/README.md) · [CRLF](../CRLF/README.md) · [CSTI](../Client%20Side%20Template%20Injection/README.md) · [CSPT](../Client%20Side%20Path%20Traversal/README.md) · [Open Redirect](../Open%20Redirect/README.md)
+
+---
 
 # 0x01 背景与原理
 

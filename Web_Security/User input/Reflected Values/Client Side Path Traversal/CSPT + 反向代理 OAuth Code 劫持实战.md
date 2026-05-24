@@ -1,7 +1,25 @@
+---
+attack_surface: [认证/授权绕过, 客户端利用]
+impact: [账户接管, 信息泄露, OAuth Code 劫持]
+risk_level: 严重
+prerequisites:
+  - OAuth 2.0 协议基础
+  - CSPT 攻击原理
+  - SPA 路由机制
+difficulty: 高级
+related_techniques:
+  - client-side-path-traversal
+  - oauth-attack
+  - open-redirect
+  - ssrf-server-side-request-forgery
+tools:
+  - Burp Suite
+  - OAuth 调试工具
+---
+
 # CSPT + 反向代理 OAuth Code 劫持实战
 
-> **风险等级：严重**
-> 本案例展示如何通过 **客户端路径遍历 (CSPT)** 操控 OAuth 认证流程，结合反向代理功能实现账户接管。核心在于利用 state 参数的 **路径遍历漏洞**，将敏感 OAuth code 重定向至攻击者控制的资源加载路径，成功率超 95%，属于高回报攻击场景。
+> 关联文档：[CSPT 主文档](./README.md) · [Open Redirect](../Open%20Redirect/README.md) · [SSRF](../SSRF/README.md)
 
 ---
 

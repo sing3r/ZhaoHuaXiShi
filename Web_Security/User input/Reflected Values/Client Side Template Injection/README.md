@@ -1,4 +1,27 @@
-# 客户端模板注入 (CSTI) 
+---
+attack_surface: [注入类, 客户端利用]
+impact: [信息泄露, 会话劫持, 远程代码执行(客户端)]
+risk_level: 高
+prerequisites:
+  - JavaScript 基础
+  - 前端框架基础 (AngularJS/VueJS/Mavo)
+  - DOM 解析与浏览器安全模型
+difficulty: 中级
+related_techniques:
+  - ssti-server-side-template-injection
+  - xss-cross-site-scripting
+  - dangling-markup
+  - csp-bypass
+  - client-side-path-traversal
+tools:
+  - Burp Suite
+  - 浏览器 DevTools
+  - ssti.txt (fuzz wordlist)
+---
+
+# 客户端模板注入 (CSTI)
+
+> 关联文档：[SSTI](../SSTI/README.md) · [XSS](../XSS/README.md) · [Dangling Markup](../Dangling%20Markup/README.md) · [CSPT](../Client%20Side%20Path%20Traversal/README.md) · [Open Redirect](../Open%20Redirect/README.md)
 
 ---
 

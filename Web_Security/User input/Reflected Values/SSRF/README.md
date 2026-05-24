@@ -24,7 +24,7 @@ tools:
 
 # SSRF (Server-Side Request Forgery) 深度解析与实战利用指南
 
-> 关联文档：[URL Format Bypass](./URL%20Format%20Bypass.md) · [Cloud SSRF](./Cloud%20SSRF.md) · [Open Redirect](../Open%20Redirect/README.md) · [SSI/ESI](../../Proxies/Server%20Side%20Inclusion%26Edge%20Side%20Inclusion/README.md)
+> 关联文档：[URL Format Bypass](./URL%20Format%20Bypass.md) · [Cloud SSRF](./Cloud%20SSRF.md) · [Open Redirect](../Open%20Redirect/README.md) · [File Inclusion](../File%20Inclusion-Path%20Traversal/README.md) · [SSI/ESI](../../Proxies/Server%20Side%20Inclusion%26Edge%20Side%20Inclusion/README.md)
 
 ---
 

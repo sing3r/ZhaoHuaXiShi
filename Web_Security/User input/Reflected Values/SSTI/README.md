@@ -23,6 +23,8 @@ tools:
 
 # SSTI (Server Side Template Injection) — 服务端模板注入
 
+> 关联文档：[Jinja2 Deep Dive](./Jinja2%20Deep%20Dive.md) · [EL Expression Language](./EL%20Expression%20Language.md) · [CSTI](../Client%20Side%20Template%20Injection/README.md) · [Command Injection](../Command%20Injection/README.md) · [SSRF](../SSRF/README.md) · [File Inclusion](../File%20Inclusion-Path%20Traversal/README.md)
+
 ---
 
 # 0x01 背景与原理

@@ -1,4 +1,28 @@
+---
+attack_surface: [客户端利用, 认证/授权绕过, 配置缺陷]
+impact: [信息泄露, 权限提升, 账户接管, 缓存污染]
+risk_level: 高
+prerequisites:
+  - SPA 路由基础 (React Router/Vue Router/Next.js)
+  - HTTP 协议与浏览器同源策略
+  - CDN 缓存机制基础
+difficulty: 中级
+related_techniques:
+  - open-redirect
+  - ssrf-server-side-request-forgery
+  - csrf-cross-site-request-forgery
+  - cache-poisoning
+  - client-side-template-injection
+  - crlf-injection
+tools:
+  - CSPTBurpExtension
+  - Eval-Villain
+  - CSPTPlayground
+---
+
 # 客户端路径遍历 (CSPT)
+
+> 关联文档：[CSPT + OAuth 劫持实战](./CSPT%20%2B%20%E5%8F%8D%E5%90%91%E4%BB%A3%E7%90%86%20OAuth%20Code%20%E5%8A%AB%E6%8C%81%E5%AE%9E%E6%88%98.md) · [XSS](../XSS/README.md) · [Open Redirect](../Open%20Redirect/README.md) · [SSRF](../SSRF/README.md) · [CRLF](../CRLF/README.md) · [CSTI](../Client%20Side%20Template%20Injection/README.md) · [Reverse Tab Nabbing](../Reverse%20Tab%20Nabbing/README.md)
 
 ---
 

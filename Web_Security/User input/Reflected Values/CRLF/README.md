@@ -1,4 +1,28 @@
+---
+attack_surface: [注入类, 协议操纵]
+impact: [信息泄露, 身份伪造, 缓存污染, 会话劫持]
+risk_level: 高
+prerequisites:
+  - HTTP 协议基础 (请求/响应结构)
+  - URL 编码与字符编码知识
+  - 缓存/CDN 基本概念
+difficulty: 中级
+related_techniques:
+  - xss-cross-site-scripting
+  - open-redirect
+  - request-smuggling
+  - cache-poisoning
+  - command-injection
+  - dangling-markup
+tools:
+  - CRLFsuite
+  - crlfuzz
+  - Burp Suite
+---
+
 # CRLF 注入漏洞深度解析与实战利用指南
+
+> 关联文档：[XSS](../XSS/README.md) · [Open Redirect](../Open%20Redirect/README.md) · [Dangling Markup](../Dangling%20Markup/README.md) · [Command Injection](../Command%20Injection/README.md) · [CSPT](../Client%20Side%20Path%20Traversal/README.md) · [SSRF](../SSRF/README.md)
 
 ---
 

@@ -25,7 +25,7 @@ tools:
 
 # Client-Side Prototype Pollution — 从原型链污染到 XSS
 
-> 关联文档：[SSRF](../SSRF/README.md) · [SSTI](../SSTI/README.md) · [Open Redirect](../Open%20Redirect/README.md)
+> 关联文档：[SSRF](../SSRF/README.md) · [SSTI](../SSTI/README.md) · [Open Redirect](../Open%20Redirect/README.md) · [XSS](../XSS/README.md) · [CSTI](../Client%20Side%20Template%20Injection/README.md)
 
 ---
 

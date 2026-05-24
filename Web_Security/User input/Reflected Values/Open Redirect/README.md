@@ -25,7 +25,7 @@ tools:
 
 # Open Redirect 漏洞深度解析与实战利用指南
 
-> 关联文档：[SSRF](../SSRF/README.md) · [URL Format Bypass](../SSRF/URL%20Format%20Bypass.md) · [CRLF](../CRLF/README.md)
+> 关联文档：[XSS](../XSS/README.md) · [SSRF](../SSRF/README.md) · [URL Format Bypass](../SSRF/URL%20Format%20Bypass.md) · [CRLF](../CRLF/README.md) · [Reverse Tab Nabbing](../Reverse%20Tab%20Nabbing/README.md) · [CSPT](../Client%20Side%20Path%20Traversal/README.md)
 
 ---
 

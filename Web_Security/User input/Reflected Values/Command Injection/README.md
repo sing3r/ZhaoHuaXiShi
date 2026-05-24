@@ -1,6 +1,31 @@
+---
+attack_surface: [注入类]
+impact: [远程代码执行, 信息泄露, 权限提升]
+risk_level: 严重
+prerequisites:
+  - 操作系统命令基础
+  - HTTP 协议基础
+  - Shell 操作符与管道知识
+difficulty: 中级
+related_techniques:
+  - ssti-server-side-template-injection
+  - ssrf-server-side-request-forgery
+  - file-inclusion
+  - deserialization
+  - crlf-injection
+tools:
+  - commix
+  - Burp Suite
+  - curl
+---
+
 # 命令注入（Command Injection）
 
-# 0x01背景与攻击原理
+> 关联文档：[SSTI](../SSTI/README.md) · [SSRF](../SSRF/README.md) · [CRLF](../CRLF/README.md) · [Open Redirect](../Open%20Redirect/README.md) · [File Inclusion](../File%20Inclusion-Path%20Traversal/README.md)
+
+---
+
+# 0x01 背景与攻击原理
 **本质是** 用户输入未经过滤直接拼接至系统命令，导致攻击者操控目标服务器执行任意操作系统命令。核心在于应用程序对用户输入的信任缺失，将数据视为代码执行。
 
 ## 1.1 根本原理
@@ -228,7 +253,7 @@ powershell C:**2\n??e*d.*?    # 通配符模糊路径
 
 # 0x08 实战关键结论
 
-## 7.1 核心要点
+## 8.1 核心要点
 
 1. **攻击优先级**：
    - 首选 `%0A` 换行符绕过空格限制（成功率 >90%）
@@ -246,7 +271,7 @@ powershell C:**2\n??e*d.*?    # 通配符模糊路径
    - 严格白名单参数过滤（禁止 `-` 开头输入）
    - 沙箱化执行环境（如 PaperCut 的 `print.script.sandboxed=Y`）
 
-### 7.1.1 一句话红队结论
+### 8.1.1 一句话红队结论
 > **命令注入的攻防本质是解析权争夺战——攻击者通过构造"合法输入"触发解析器降级执行，而防御关键在于输入上下文的绝对隔离。实战中，90% 的漏洞源于对参数边界的信任缺失，而非过滤规则的不足。**
 
 ---
