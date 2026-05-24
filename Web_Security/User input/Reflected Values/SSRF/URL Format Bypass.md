@@ -111,6 +111,9 @@ http://[fe80::1%25eth0]/
 http://[fe80::a9ff:fe00:1%25en0]/
 ```
 
+**IPv6 Zone ID 绕过原理**：支持 RFC 6874 的现代 URL 解析器允许 link-local IPv6 地址通过 `%` 后跟 zone identifier。部分安全过滤器不识别此语法，仅剥离方括号 IPv6 字面量，使以下 payload 到达内部接口。始终在安全决策前规范化地址或完全剥离可选的 zone ID。
+```
+
 ## 2.3 特殊 localhost 地址
 
 ```bash
@@ -317,6 +320,7 @@ python3 singularity.py \
 
 ```bash
 # SSRF-PayloadMaker — 80k+ 组合的 host 变形生成器
+# 自动包含混合编码、强制 HTTP 降级、反斜杠变体
 python3 ssrf_maker.py \
   --allowed example.com \
   --attacker attacker.com \
@@ -324,12 +328,18 @@ python3 ssrf_maker.py \
 
 # recollapse — 正则绕过变异生成器
 # 基于输入 URL 生成所有可能的绕过变体
+# 详见: https://0xacb.com/2022/11/21/recollapse/
 ```
 
-## 6.2 Burp 插件
+生成的 Payload 列表可直接导入 Burp Intruder 或 ffuf。
+
+## 6.2 Burp 插件与在线工具
 
 - **[Burp-Encode-IP](https://github.com/e1abrador/Burp-Encode-IP)** — 自动 IP 格式编码转换
-- **[PortSwigger URL Validation Bypass Cheat Sheet](https://portswigger.net/web-security/ssrf/url-validation-bypass-cheat-sheet)** — 在线 Payload 生成器，根据允许/禁止的主机自动生成绕过列表，区分"参数值"、"Host 头"、"CORS 头"三种注入场景
+- **[PortSwigger URL Validation Bypass Cheat Sheet](https://portswigger.net/web-security/ssrf/url-validation-bypass-cheat-sheet)** — 在线 Payload 生成器，输入允许/禁止的主机后自动生成绕过列表。区分三种注入场景：
+  - **参数值** (Parameter Value) — URL 作为请求参数值
+  - **Host 头** (Host Header) — URL 出现在 Host 头中
+  - **CORS 头** (CORS Header) — URL 出现在 Origin/Referer 等 CORS 相关头中
 
 ## 6.3 重定向器 (通过 302 绕过协议/主机过滤)
 
@@ -425,7 +435,12 @@ Decimal:  173.194.35.35 → 2915189539
 
 - [PortSwigger — URL Validation Bypass Cheat Sheet](https://portswigger.net/web-security/ssrf/url-validation-bypass-cheat-sheet)
 - [PortSwigger Research — New Crazy Payloads in URL Validation Bypass](https://portswigger.net/research/new-crazy-payloads-in-the-url-validation-bypass-cheat-sheet)
+- [Claroty — Exploiting URL Parsing Confusion](https://claroty.com/2022/01/10/blog-research-exploiting-url-parsing-confusion/)
 - [recollapse — Regex Bypass Fuzzer](https://github.com/0xacb/recollapse)
+- [recollapse 技术详解](https://0xacb.com/2022/11/21/recollapse/)
 - [SSRF-PayloadMaker](https://github.com/hsynuzm/SSRF-PayloadMaker)
 - [IP Converter (十进制/八进制/十六进制)](https://www.silisoftware.com/tools/ipconverter.php)
 - [Tenable — BentoML SSRF Patch Bypass (CVE-2025-54381)](https://www.tenable.com/blog/how-tenable-bypassed-patch-for-bentoml-ssrf-vulnerability-CVE-2025-54381)
+- [Just Gopher It — Blind SSRF → RCE via Redirect](https://sirleeroyjenkins.medium.com/just-gopher-it-escalating-a-blind-ssrf-to-rce-for-15k-f5329a974530)
+- [CVE-2025-0454 — AutoGPT SSRF via URL Parsing Confusion](https://medium.com/%40narendarlb123/1-cve-2025-0454-autogpt-ssrf-via-url-parsing-confusion-921d66fafcbe)
+- [NVD — CVE-2024-22243 (Spring UriComponentsBuilder)](https://nvd.nist.gov/vuln/detail/CVE-2024-22243)

