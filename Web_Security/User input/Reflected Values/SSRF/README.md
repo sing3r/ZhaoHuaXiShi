@@ -270,8 +270,8 @@ Connection: close
 **Spring Boot 典型漏洞代码**：
 
 ```java
-@GetMapping("/path")
-throws IOException {
+@GetMapping("/url")
+public String getURLValue(HttpServletRequest request) throws IOException {
     String site = "http://ifconfig.me";
     String uri = request.getRequestURI();
     URL url = new URL(site + uri.toString());  // ← 路径直接拼接到 URL

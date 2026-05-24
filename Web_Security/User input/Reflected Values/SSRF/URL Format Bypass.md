@@ -398,23 +398,43 @@ HTTPServer(("", int(sys.argv[1])), Redirect).serve_forever()
 
 ## 9.1 主流解析器对比
 
-以下来自 URL 解析混淆研究的实证数据 [Claroty 2022]，展示了同一 URL 在不同语言/库中的解析差异：
+以下数据来自 Claroty Team82 的 URL 解析混淆实证研究 [Claroty 2022]，对四种 URL 混淆类型（Scheme / Slash / Backslash / URL-Encoded）横向对比了 17 种解析器的处理差异：
 
-| 解析器 | 语言/工具 | 对 `\@` 行为 | 对十进制 IP | 对 Octal IP |
-|--------|-----------|-------------|-------------|-------------|
-| `urllib.parse.urlparse` | Python | RFC 3986 严格模式 | 不支持 | 不支持 |
-| `urllib.parse.urlsplit` | Python | RFC 3986 | 不支持 | 不支持 |
-| `curl` | C | libcurl 行为 | 支持 | 部分支持 |
-| `wget` | C | 较为宽松 | 支持 | 部分支持 |
-| `java.net.URI` | Java | RFC 3986 | 不支持 | 不支持 |
-| `java.net.URL` | Java | 较宽松 | 部分支持 | 不支持 |
-| `UriComponentsBuilder` | Spring | 自定义 (有 `[` bug) | 不支持 | 不支持 |
-| `parse_url()` | PHP | 宽松 | 部分支持 | 部分支持 |
-| `url.parse()` | Node.js | WHATWG 倾向 | 支持 | 不支持 |
-| `net/url.Parse()` | Go | RFC 3986 | 不支持 | 不支持 |
-| `Addressable::URI` | Ruby | RFC 3986 | 不支持 | 不支持 |
+**测试 URL**：
 
-> **核心发现**：没有任何两个解析器对所有边缘情况的处理完全一致。这种不一致性是所有 URL 校验绕过技术的根基。
+| 混淆类型 | 测试 URL |
+|----------|----------|
+| Scheme Confusion | `foo.com` |
+| Slash Confusion | `http:///foo.com` |
+| Backslash Confusion | `http:\\\\foo.com` |
+| URL-Encoded Confusion | `http://%66%6f%6f%2e%63%6f%6d` |
+
+**完整对比矩阵**：
+
+| Language | Library | Scheme Confusion | Slash Confusion | Backslash Confusion | URL-Encoded Confusion |
+|----------|---------|------------------|-----------------|---------------------|----------------------|
+| Python | `urllib.urlsplit` | Host: None / Path: /foo.com | Host: None / Path: /foo.com | Host: None / Path: /\\foo.com | Host: %66%6f%6f%2e%63%6f%6d / Path: None |
+| Python | `urllib.urlparse` | Host: None / Path: /foo.com | Host: None / Path: /foo.com | Host: None / Path: /\\foo.com | Host: %66%6f%6f%2e%63%6f%6d / Path: None |
+| Python | `urllib.urlopen` | Host: None / Path: /foo.com | Host: None / Path: /foo.com | Host: None / Path: /\\foo.com | **Host: foo.com** / Path: None |
+| Python | `rfc3986` | Host: None / Path: /foo.com | Host: None / Path: /foo.com | Host: None / Path: %5c%5cfoo.com | Host: %66%6f%6f%2e%63%6f%6d / Path: None |
+| Python | `httptools` | **Invalid URL** | **Invalid URL** | **Invalid URL** | **Invalid URL** |
+| Python | `urllib3` | **Host: foo.com** / Path: None | Host: None / Path: /foo.com | Host: None / Path: /%5c%5cfoo.com | **Host: foo.com** / Path: None |
+| C | `curl` | **Host: foo.com** / Path: None | **Host: foo.com** / Path: None | **Invalid URL** | **Host: foo.com** / Path: None |
+| C | `wget` | **Host: foo.com** / Path: None | **Invalid URL** | Host: None / Path: /%5c%5cfoo.com | **Host: foo.com** / Path: None |
+| Browser | Chrome | (context-dependent) | **Host: foo.com** / Path: None | **Host: foo.com** / Path: None | **Host: foo.com** / Path: None |
+| .NET | `Uri` | **Invalid URL** | **Invalid URL** | **Host: foo.com** / Path: None | **Invalid URL** |
+| Java | `java.net.URL` | **Invalid URL** | Host: None / Path: /foo.com | Host: None / Path: \\foo.com | **Host: foo.com** / Path: None |
+| Java | `java.net.URI` | Host: None / Path: /foo.com | Host: None / Path: /foo.com | **Invalid URL** | Host: %66%6f%6f%2e%63%6f%6d / Path: None |
+| PHP | `parse_url()` | Host: None / Path: foo.com | **Invalid URL** | Host: None / Path: \\foo.com | Host: %66%6f%6f%2e%63%6f%6d / Path: None |
+| NodeJS | `url.parse()` | Host: None / Path: foo.com | Host: None / Path: /foo.com | **Host: foo.com** / Path: None | Host: %66%6f%6f%2e%63%6f%6d / Path: None |
+| NodeJS | `url-parse` | Host: None / Path: foo.com | **Host: foo.com** / Path: None | **Host: foo.com** / Path: None | Host: %66%6f%6f%2e%63%6f%6d / Path: None |
+| Go | `net/url` | Host: None / Path: foo.com | Host: None / Path: /foo.com | **Invalid URL** | **Invalid URL** |
+| Ruby | `Addressable::URI` | Host: None / Path: foo.com | Host: None / Path: /foo.com | **Invalid URL** | Host: %66%6f%6f%2e%63%6f%6d / Path: None |
+| Perl | `URI` | Host: None / Path: foo.com | Host: None / Path: /foo.com | Host: None / Path: %5c%5cfoo.com | **Host: foo.com** / Path: None |
+
+> * 根据 Claroty 报告，curl 后来已修复以兼容 RFC 3986。
+>
+> **核心发现**：没有任何两个解析器对所有边缘情况的处理完全一致。即使是同一语言的不同库（如 Python 的 `urlsplit` vs `urllib3`）也存在显著差异。攻击者只需找到一种"校验时解析为 A、实际访问时解析为 B"的组合即可绕过检查。
 
 ## 9.2 IP 编码参考图
 
