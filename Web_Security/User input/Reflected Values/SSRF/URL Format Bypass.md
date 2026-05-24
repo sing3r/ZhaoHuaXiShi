@@ -21,6 +21,8 @@ tools:
 
 # URL Format Bypass — 通用 URL 校验绕过技术矩阵
 
+> 关联文档：[SSRF 主文档](./README.md) · [Cloud SSRF](./Cloud%20SSRF.md) · [Open Redirect](../Open%20Redirect/README.md)
+
 ---
 
 # 0x01 背景与原理

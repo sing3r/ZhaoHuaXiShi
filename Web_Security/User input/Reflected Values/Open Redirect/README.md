@@ -25,6 +25,8 @@ tools:
 
 # Open Redirect 漏洞深度解析与实战利用指南
 
+> 关联文档：[SSRF](../SSRF/README.md) · [URL Format Bypass](../SSRF/URL%20Format%20Bypass.md) · [CRLF](../CRLF/README.md)
+
 ---
 
 # 0x01 背景与原理

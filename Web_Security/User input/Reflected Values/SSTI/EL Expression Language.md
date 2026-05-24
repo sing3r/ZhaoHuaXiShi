@@ -1,4 +1,22 @@
+---
+attack_surface: [注入类, 编码/序列化滥用]
+impact: [远程代码执行, 信息泄露, 权限提升]
+risk_level: 严重
+prerequisites:
+  - Java/JavaEE 基础
+  - EL/OGNL/SpEL 基本语法
+related_techniques:
+  - ssti-server-side-template-injection
+  - deserialization
+  - command-injection
+difficulty: 高级
+tools:
+  - Burp Suite
+---
+
 # EL (Expression Language) / SpEL / OGNL 专项深度分析
+
+> 关联文档：[SSTI 主文档](./README.md) · [Jinja2 Deep Dive](./Jinja2%20Deep%20Dive.md)
 
 ---
 

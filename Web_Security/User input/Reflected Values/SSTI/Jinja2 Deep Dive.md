@@ -1,4 +1,22 @@
+---
+attack_surface: [注入类, 编码/序列化滥用]
+impact: [远程代码执行, 信息泄露, 权限提升]
+risk_level: 严重
+prerequisites:
+  - Python Flask/Jinja2 基础
+  - Python 对象模型理解 (MRO/__mro__/__subclasses__)
+related_techniques:
+  - ssti-server-side-template-injection
+  - python-sandbox-escape
+  - command-injection
+difficulty: 高级
+tools:
+  - Fenjing
+---
+
 # Jinja2 SSTI 深度利用
+
+> 关联文档：[SSTI 主文档](./README.md) · [EL Expression Language](./EL%20Expression%20Language.md)
 
 ---
 

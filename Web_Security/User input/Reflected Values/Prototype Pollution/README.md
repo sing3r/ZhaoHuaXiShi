@@ -25,6 +25,8 @@ tools:
 
 # Client-Side Prototype Pollution — 从原型链污染到 XSS
 
+> 关联文档：[SSRF](../SSRF/README.md) · [SSTI](../SSTI/README.md) · [Open Redirect](../Open%20Redirect/README.md)
+
 ---
 
 # 0x01 背景与原理

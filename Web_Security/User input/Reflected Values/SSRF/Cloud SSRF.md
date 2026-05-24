@@ -19,6 +19,8 @@ tools:
 
 # 云环境 SSRF — 元数据利用与凭据窃取
 
+> 关联文档：[SSRF 主文档](./README.md) · [URL Format Bypass](./URL%20Format%20Bypass.md)
+
 ---
 
 # 0x01 AWS

@@ -668,9 +668,46 @@ ESI + Cache Poisoning：
 
 ------
 
-# 0x05 Fuzzing 字典与自动化检测
+# 0x05 检测与防御
 
-## 5.1 Brute-Force 检测字典
+## 5.1 开发层面
+
+1. **禁用 SSI/ESI 解析**（如果业务不需要）：
+   - Apache：移除 `mod_include` 或设置 `Options -Includes`
+   - Nginx：禁用 `ssi on` 指令
+   - Varnish：移除或限制 ESI 处理规则
+   - CDN（Akamai/Fastly/Cloudflare）：检查 ESI 是否启用，按需关闭
+
+2. **输入验证**：拒绝或转义包含 SSI/ESI 语法的用户输入：
+   ```
+   <!--# ... --> / <esi: ... > / $(...) 
+   ```
+
+3. **沙箱与限制**：如果必须保留 ESI，实施主机白名单限制 `esi:include` 只能访问受信任的内部主机
+
+4. **响应头控制**：在上游应用中显式设置 `Surrogate-Control: content="ESI/1.0"` 仅对需要 ESI 处理的页面启用
+
+5. **最小权限原则**：SSI 的 `exec cmd` 和 ESI 的 XSLT 转换以最低权限运行
+
+## 5.2 检测层面
+
+- **WAF 规则**：检测请求中 `<esi:`、`<!--#exec`、`$(HTTP_COOKIE)` 等 ESI/SSI 特征
+- **RASP**：运行时拦截通过 ESI-include 发起的异常出站请求（尤其是到云 metadata 地址）
+- **SAST**：扫描代码中用户输入直接拼入 `.shtml` 模板或经过 ESI 处理器的路径
+- **DAST**：使用 ssi_esi.txt 字典对反射点进行 Fuzz
+
+## 5.3 应急响应
+
+- 确认 ESI/SSI 引擎类型和版本（通过 `Surrogate-Control` 响应头、`<esi:debug/>` 等手段）
+- 审计 `esi:include` 的出站请求日志，识别已被利用的注入点
+- 检查是否有 Cookie 通过 `$(HTTP_COOKIE)` 泄露的证据（外带 DNS/HTTP 日志）
+- 如果使用 Akamai，检查 `<esi:debug/>` 是否暴露了内部路径信息
+
+------
+
+# 0x06 Fuzzing 字典与自动化检测
+
+## 6.1 Brute-Force 检测字典
 
 使用 [ssi_esi.txt](https://github.com/carlospolop/Auto_Wordlists/blob/main/wordlists/ssi_esi.txt) 对用户反射点进行 Fuzz：
 
@@ -680,7 +717,7 @@ curl -sL https://raw.githubusercontent.com/carlospolop/Auto_Wordlists/main/wordl
 ffuf -u 'https://target.com/search?q=FUZZ' -w /tmp/ssi_esi.txt -mr 'root:|www-data|<!--#echo|hello'
 ```
 
-## 5.2 Burp Suite 自动化
+## 6.2 Burp Suite 自动化
 
 - **插件推荐**：使用 `ESI Injector` 或自定义扫描规则。
 - **Fuzz 列表**：重点关注 `/search`、`/comment` 等用户输入会反射到页面中的位置。
@@ -688,13 +725,13 @@ ffuf -u 'https://target.com/search?q=FUZZ' -w /tmp/ssi_esi.txt -mr 'root:|www-da
 
 ---
 
-# 0x06 总结
+# 0x07 总结
 
 > **ESI 注入 ≠ 模板注入，而是"边缘计算层的 SSRF + 数据窃取 + 响应劫持"综合漏洞。**
 
 ---
 
-# 0x07 参考资料
+# 0x08 参考资料
 
 - [Apache mod_include — SSI 官方文档](https://httpd.apache.org/docs/current/howto/ssi.html)
 - [GoSecure — Beyond XSS: Edge Side Include Injection (Part 1)](https://www.gosecure.net/blog/2018/04/03/beyond-xss-edge-side-include-injection/)
