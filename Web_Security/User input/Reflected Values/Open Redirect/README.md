@@ -11,6 +11,7 @@ related_techniques:
   - xss-cross-site-scripting
   - csrf-cross-site-request-forgery
   - ssrf-server-side-request-forgery
+  - url-format-bypass
   - crlf-injection
   - oauth-to-account-takeover
   - client-side-path-traversal
@@ -211,6 +212,10 @@ evil.example%00           # Null 字节截断（部分语言）
 %09//evil.example         # 制表符前缀
 evil.example%0d%0a        # CRLF 注入前缀
 ```
+
+### 3.1.7 更深入的 URL 格式绕过
+
+> **交叉引用**：以上 3.1.1 ~ 3.1.6 仅覆盖了 Open Redirect 场景下最常用的 URL 校验绕过技术。完整的 URL 解析差异利用矩阵（含 Localhost 表示变形全集、Domain 解析器混淆、反斜杠陷阱、DNS Rebinding、近期 CVE 实例）请参见 **SSRF → [URL Format Bypass](../SSRF/URL%20Format%20Bypass.md)** 文档。这些技术与 Open Redirect 共享同一核心——利用 URL 解析器差异绕过白名单校验，因此可以交叉应用于重定向目标的绕过。
 
 ---
 
