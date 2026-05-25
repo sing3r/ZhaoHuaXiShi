@@ -763,10 +763,10 @@ if (self !== top) {
 
 ## 交叉引用
 
-- [Iframe Traps](../iframe-traps/README.md) — 全屏 iframe 持久化钓鱼与 Clickjacking 的联动
-- [XSS (Cross-Site Scripting)](../../User input/Reflected Values/XSS/README.md) — Self-XSS + Clickjacking 组合攻击
-- [PostMessage Vulnerabilities](../../User input/Forms-WebSockets-PostMsgs/PostMessage Vulnerabilities/README.md) — postMessage wildcard + clickjacking 联动
-- [OAuth 攻击](../../External Identity Management/OAuth/README.md) — DoubleClickjacking OAuth 授权劫持
-- [CSRF](../../User input/Forms-WebSockets-PostMsgs/CSRF/README.md) — 同为跨站请求伪造，防御机制互补
-- [Browser Extension Attacks](../../Other Helpful Vulnerabilities/Browser Extension Attacks/README.md) — 扩展 clickjacking 的上下文
-- [Tapjacking (Mobile)](../../Mobile/) — Android 移动端的等效攻击
+- [Iframe Traps / Click Isolation](../Iframe%20Traps/) — 全屏 iframe 持久化钓鱼与 Clickjacking 的联动（同为 HTTP Headers 分类）
+- [XSS (Cross-Site Scripting)](../../Reflected%20Values/XSS/) — Self-XSS + Clickjacking 组合攻击
+- [PostMessage Vulnerabilities](../../Forms-WebSockets-PostMsgs/PostMessage%20Vulnerabilities/) — postMessage wildcard + clickjacking 联动
+- [CSRF](../../Forms-WebSockets-PostMsgs/CSRF/) — 同为跨站请求伪造，防御机制互补
+- [OAuth 攻击](../../../External%20Identity%20Management/OAuth/) — DoubleClickjacking OAuth 授权劫持
+- [Browser Extension Attacks](../../../Other%20Helpful%20Vulnerabilities/Browser%20Extension%20Attacks/) — 扩展 clickjacking 的上下文
+- [Tapjacking (Mobile)](../../../Mobile/) — Android 移动端的等效攻击
