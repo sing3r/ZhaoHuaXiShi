@@ -9,9 +9,9 @@ impact:
   - 远程代码执行
 risk_level: 中
 prerequisites:
-  - HTTP Protocol (headers, methods, status codes)
-  - Proxy/CDN Architecture
-  - HTTP Request Smuggling Basics
+  - HTTP 协议（头部、方法、状态码）
+  - 代理/CDN 架构
+  - HTTP Request Smuggling 基础
 related_techniques:
   - http-request-smuggling
   - hop-by-hop-headers
@@ -34,53 +34,53 @@ tools:
 ### 知识路径
 
 ```
-Special HTTP Headers (this document)
-  ├── Prerequisite: HTTP/1.1 Protocol — header format, hop-by-hop vs end-to-end
-  ├── Next: IP Spoofing via X-Forwarded-* → auth bypass, ACL evasion
-  ├── Next: Header Name Casing Bypass → CVE-2025-27636 Apache Camel RCE
-  ├── Related: HTTP Request Smuggling (CL.TE / TE.CL / 0.CL / CL.0)
-  │   └── See: Proxies/HTTP Request Smuggling
-  ├── Related: Abusing Hop-by-Hop Headers (Connection downgrade)
-  │   └── See: Proxies/Abusing hop-by-hop headers
-  ├── Related: Cache Poisoning & Cache Deception
-  │   └── See: Proxies/Cache Poisoning&Cache Deception
-  └── Related: CSP Bypass
-      └── See: User input/HTTP Headers/CSP Bypass
+Special HTTP Headers（本文档）
+  ├── 前置知识：HTTP/1.1 协议 — 头部格式、hop-by-hop vs end-to-end
+  ├── 进阶：通过 X-Forwarded-* 进行 IP 伪造 → 认证绕过、ACL 规避
+  ├── 进阶：Header Name Casing Bypass → CVE-2025-27636 Apache Camel RCE
+  ├── 关联：HTTP Request Smuggling（CL.TE / TE.CL / 0.CL / CL.0）
+  │   └── 参见：Proxies/HTTP Request Smuggling
+  ├── 关联：Abusing Hop-by-Hop Headers（Connection 降级）
+  │   └── 参见：Proxies/Abusing hop-by-hop headers
+  ├── 关联：Cache Poisoning 与 Cache Deception
+  │   └── 参见：Proxies/Cache Poisoning&Cache Deception
+  └── 关联：CSP Bypass
+      └── 参见：User input/HTTP Headers/CSP Bypass
 ```
 
 ---
 
-# 0x01 Special HTTP Headers — Principles & Classification
+# 0x01 特殊 HTTP 头部 — 原理与分类
 
-## 1.1 Attack Surface Overview
+## 1.1 攻击面总览
 
-HTTP headers define the metadata layer of web communication. While most headers are innocuous, certain headers — particularly those interpreted by intermediate proxies, CDNs, and load balancers — can be abused to manipulate routing, authentication, caching, and request interpretation.
+HTTP 头部定义了 Web 通信的元数据层。虽然大多数头部是良性的，但某些头部——尤其是被中间代理、CDN 和负载均衡器解释的头部——可被滥用于操控路由、认证、缓存和请求解释。
 
-**Key header categories by attack surface:**
+**按攻击面的关键头部类别：**
 
-| Category | Mechanism | Impact |
-|----------|-----------|--------|
-| IP/Location Rewrite | Override perceived client IP via proxy headers | Auth bypass, ACL evasion, SSRF pivot |
-| Hop-by-Hop | Manipulate proxy connection semantics | Header stripping, request smuggling |
-| Cache | Control cache behavior and cache keys | Cache poisoning, cache deception |
-| Conditional/Range | Exploit ETag and byte-range logic | Information disclosure, data exfiltration |
-| Security | Configure browser security policies | Misconfiguration → XSS, clickjacking, Spectre |
-| Header Casing | Exploit case-sensitive header filtering | Filter bypass → RCE |
+| 类别 | 机制 | 影响 |
+|------|------|------|
+| IP/位置重写 | 通过代理头部覆盖感知到的客户端 IP | 认证绕过、ACL 规避、SSRF 跳板 |
+| Hop-by-Hop | 操控代理连接语义 | 头部剥离、请求走私 |
+| 缓存 | 控制缓存行为和缓存键 | 缓存投毒、缓存欺骗 |
+| 条件/范围请求 | 利用 ETag 和字节范围逻辑 | 信息泄露、数据外传 |
+| 安全策略 | 配置浏览器安全策略 | 配置错误 → XSS、点击劫持、Spectre |
+| Header 大小写 | 利用大小写敏感的头部过滤 | 过滤器绕过 → RCE |
 
-## 1.2 Wordlists & Tools
+## 1.2 字典与工具
 
-- [SecLists http-request-headers](https://github.com/danielmiessler/SecLists/tree/master/Miscellaneous/Web/http-request-headers) — Comprehensive header wordlist
-- [humble](https://github.com/rfc-st/humble) — HTTP header fuzzing tool
+- [SecLists http-request-headers](https://github.com/danielmiessler/SecLists/tree/master/Miscellaneous/Web/http-request-headers) — 综合 HTTP 头部字典
+- [humble](https://github.com/rfc-st/humble) — HTTP 头部模糊测试工具
 
 ---
 
-# 0x02 IP & Location Rewrite Headers
+# 0x02 IP 与位置重写头部
 
-## 2.1 Mechanism
+## 2.1 机制
 
-Proxies, load balancers, and CDNs often append headers indicating the original client IP. Applications may trust these headers for authentication, rate limiting, or access control decisions. An attacker can **spoof** these headers to impersonate a trusted IP (e.g., `127.0.0.1` for internal-only endpoints).
+代理、负载均衡器和 CDN 通常会追加指示原始客户端 IP 的头部。应用可能信任这些头部用于认证、速率限制或访问控制决策。攻击者可以**伪造**这些头部来冒充受信任的 IP（如用 `127.0.0.1` 访问仅限内部的端点）。
 
-## 2.2 IP Spoofing Headers
+## 2.2 IP 伪造头部
 
 ```
 X-Originating-IP: 127.0.0.1
@@ -101,125 +101,125 @@ Via: 1.0 fred, 1.1 127.0.0.1
 Connection: close, X-Forwarded-For
 ```
 
-> **Note:** `Connection: close, X-Forwarded-For` exploits hop-by-hop header behavior — see §3.1 and [Abusing Hop-by-Hop Headers](../Abusing%20hop-by-hop%20headers/README.md).
+> **注意：**`Connection: close, X-Forwarded-For` 利用了 hop-by-hop 头部行为 — 参见 §3.1 和 [Abusing Hop-by-Hop Headers](../Abusing%20hop-by-hop%20headers/README.md)。
 
-## 2.3 URL/Location Rewrite Headers
+## 2.3 URL/位置重写头部
 
-These headers override the requested URL path, enabling access to hidden or protected endpoints:
+这些头部覆盖请求的 URL 路径，可访问隐藏或受保护的端点：
 
 ```
 X-Original-URL: /admin/console
 X-Rewrite-URL: /admin/console
 ```
 
-When a reverse proxy or middleware uses these headers to route requests, spoofing them can bypass path-based access controls.
+当反向代理或中间件使用这些头进行请求路由时，伪造它们可以绕过基于路径的访问控制。
 
 ---
 
-# 0x03 Hop-by-Hop Headers & Request Smuggling
+# 0x03 Hop-by-Hop 头部与请求走私
 
-## 3.1 Hop-by-Hop Headers
+## 3.1 Hop-by-Hop 头部
 
-A **hop-by-hop header** is designed to be processed and consumed by the proxy currently handling the request, as opposed to an **end-to-end header** which is intended for the final destination.
+**Hop-by-hop 头部**被设计为由当前处理请求的代理处理和消费，与面向最终目标的 **end-to-end 头部**相对。
 
-The `Connection` header controls which headers are treated as hop-by-hop:
+`Connection` 头部控制哪些头被作为 hop-by-hop 处理：
 
 ```
 Connection: close, X-Forwarded-For
 ```
 
-This causes the proxy to strip `X-Forwarded-For` before forwarding. Conversely, omitting hop-by-hop headers that a proxy expects can cause unexpected forwarding behavior.
+这导致代理在转发前剥离 `X-Forwarded-For`。反之，如果省略代理期望的 hop-by-hop 头部，可能导致意外的转发行为。
 
-> **Deep dive:** [Abusing Hop-by-Hop Headers](../Abusing%20hop-by-hop%20headers/README.md)
+> **深度分析：**[Abusing Hop-by-Hop Headers](../Abusing%20hop-by-hop%20headers/README.md)
 
-## 3.2 HTTP Request Smuggling Headers
+## 3.2 HTTP Request Smuggling 头部
 
-Core smuggling headers:
+核心走私头部：
 
 ```
 Content-Length: 30
 Transfer-Encoding: chunked
 ```
 
-Variations in how front-end proxies and back-end servers parse `Content-Length` vs `Transfer-Encoding` create desynchronization opportunities exploited in [HTTP Request Smuggling](../HTTP%20Request%20Smuggling/README.md).
+前端代理和后端服务器解析 `Content-Length` 与 `Transfer-Encoding` 的差异创造了在 [HTTP Request Smuggling](../HTTP%20Request%20Smuggling/README.md) 中被利用的去同步机会。
 
-## 3.3 The Expect Header
+## 3.3 Expect 头部
 
-### 3.3.1 Normal Behavior
+### 3.3.1 正常行为
 
-The `Expect: 100-continue` header allows a client to ask the server: "I'm about to send a large body — are you ready?" The server responds with `HTTP/1.1 100 Continue` before the client transmits the body.
+`Expect: 100-continue` 头部允许客户端询问服务器："我将发送一个大 body — 你准备好了吗？"服务器在客户端传输 body 之前响应 `HTTP/1.1 100 Continue`。
 
-### 3.3.2 Observed Anomalies
+### 3.3.2 观察到的异常
 
-Multiple unexpected behaviors have been observed with `Expect: 100-continue`:
+使用 `Expect: 100-continue` 时观察到多种意外行为：
 
-- **HEAD + body hang:** Sending a HEAD request with a body — the server didn't account for HEAD requests having no body and kept the connection open until timeout.
-- **Random data leak:** Some servers sent extraneous data including random bytes from the socket buffer, secret keys, or prevented front-end header stripping.
-- **0.CL desync:** The backend responded with a 400 instead of 100, but the front-end proxy was prepared to send the body — the backend interpreted the body as a new request.
-- **Expect variant desync:** Sending `Expect: y 100-continue` (non-standard variant) also triggered 0.CL desynchronization.
-- **CL.0 desync:** When the backend responded with a 404, the malicious request's `Content-Length` caused the backend to consume the next victim's request bytes as the body. The backend sends two responses (404 for malicious + victim response), but the front-end only expects one response — the second response is paired with a subsequent victim request, creating a persistent response queue desynchronization.
+- **HEAD + body 挂起：**发送带 body 的 HEAD 请求 — 服务器未考虑 HEAD 请求不应有 body，保持连接打开直到超时。
+- **随机数据泄露：**某些服务器发送额外数据，包括来自 Socket 缓冲区的随机字节、密钥，或阻止前端剥离头部值。
+- **0.CL 去同步：**后端以 400 而非 100 响应，但前端代理已准备好发送 body — 后端将 body 解释为新请求。
+- **Expect 变体去同步：**发送 `Expect: y 100-continue`（非标准变体）同样触发 0.CL 去同步。
+- **CL.0 去同步：**当后端以 404 响应时，恶意请求的 `Content-Length` 导致后端将下一个受害者请求的字节作为 body 消费。后端发送两个响应（恶意请求的 404 + 受害者响应），但前端仅期望一个响应 — 第二个响应与后续受害者请求配对，造成持久化的响应队列去同步。
 
-> **Full coverage:** [HTTP Request Smuggling](../HTTP%20Request%20Smuggling/README.md)
-
----
-
-# 0x04 Cache Headers
-
-## 4.1 Server-Side Cache Indicators
-
-| Header | Purpose | Attack Relevance |
-|--------|---------|-----------------|
-| `X-Cache: miss` / `X-Cache: hit` | Indicates whether response was served from cache | Reconnaissance — identifies cacheable resources |
-| `Cf-Cache-Status` | Cloudflare-specific cache status | Same as `X-Cache` for Cloudflare |
-| `Cache-Control: public, max-age=1800` | Defines caching policy and TTL | Cache poisoning target — override cache duration |
-| `Vary` | Specifies additional headers that form part of the cache key | Cache key manipulation — adding unkeyed headers to Vary |
-| `Age: 1800` | Seconds since object was cached | Cache timing analysis |
-| `Server-Timing: cdn-cache; desc=HIT` | CDN-level cache status in Server-Timing format | Alternative cache detection |
-
-## 4.2 Client-Side / Local Cache Headers
-
-| Header | Purpose |
-|--------|---------|
-| `Clear-Site-Data: "cache", "cookies"` | Instructs browser to clear specified storage types |
-| `Expires: Wed, 21 Oct 2015 07:28:00 GMT` | Absolute expiration timestamp |
-| `Pragma: no-cache` | Legacy equivalent of `Cache-Control: no-cache` |
-| `Warning: 110 anderson/1.3.37 "Response is stale"` | Indicates potential issues with cached response status |
-
-> **Deep dive:** [Cache Deception](../Cache%20Poisoning%26Cache%20Deception/README.md)
+> **完整分析：**[HTTP Request Smuggling](../HTTP%20Request%20Smuggling/README.md)
 
 ---
 
-# 0x05 Conditional & Range Request Headers
+# 0x04 缓存头部
 
-## 5.1 Conditional Headers (If-* Family)
+## 4.1 服务端缓存指示器
 
-| Request Header | Response Header | Behavior |
-|---------------|-----------------|----------|
-| `If-Modified-Since` | `Last-Modified` | Return content only if modified after the given date |
-| `If-Unmodified-Since` | `Last-Modified` | Return content only if NOT modified after the given date |
-| `If-Match` | `ETag` | Return content only if ETag matches |
-| `If-None-Match` | `ETag` | Return content only if ETag does NOT match |
+| 头部 | 用途 | 攻击相关性 |
+|------|------|----------|
+| `X-Cache: miss` / `X-Cache: hit` | 指示响应是否从缓存提供 | 侦察 — 识别可缓存资源 |
+| `Cf-Cache-Status` | Cloudflare 专用缓存状态 | 同 `X-Cache`，针对 Cloudflare |
+| `Cache-Control: public, max-age=1800` | 定义缓存策略和 TTL | 缓存投毒目标 — 覆盖缓存时长 |
+| `Vary` | 指定构成缓存键一部分的额外头部 | 缓存键操控 — 向 Vary 添加未键控的头部 |
+| `Age: 1800` | 对象被缓存以来的秒数 | 缓存时间分析 |
+| `Server-Timing: cdn-cache; desc=HIT` | Server-Timing 格式的 CDN 级缓存状态 | 替代缓存检测方式 |
 
-The `ETag` value is typically calculated based on response content. For example:
+## 4.2 客户端/本地缓存头部
+
+| 头部 | 用途 |
+|------|------|
+| `Clear-Site-Data: "cache", "cookies"` | 指示浏览器清除指定的存储类型 |
+| `Expires: Wed, 21 Oct 2015 07:28:00 GMT` | 绝对过期时间戳 |
+| `Pragma: no-cache` | `Cache-Control: no-cache` 的遗留等价形式 |
+| `Warning: 110 anderson/1.3.37 "Response is stale"` | 指示缓存响应状态可能存在的问题 |
+
+> **深度分析：**[Cache Deception](../Cache%20Poisoning%26Cache%20Deception/README.md)
+
+---
+
+# 0x05 条件请求与范围请求头部
+
+## 5.1 条件请求头部（If-* 系列）
+
+| 请求头 | 响应头 | 行为 |
+|--------|--------|------|
+| `If-Modified-Since` | `Last-Modified` | 仅在给定日期后被修改时返回内容 |
+| `If-Unmodified-Since` | `Last-Modified` | 仅在给定日期后未被修改时返回内容 |
+| `If-Match` | `ETag` | 仅在 ETag 匹配时返回内容 |
+| `If-None-Match` | `ETag` | 仅在 ETag 不匹配时返回内容 |
+
+`ETag` 值通常基于响应内容计算。例如：
 ```
 ETag: W/"37-eL2g8DEyqntYlaLp5XLInBWsjWI"
 ```
-Indicates the ETag is the **SHA1 of 37 bytes**.
+表示 ETag 是 **37 字节的 SHA1** 哈希值。
 
-## 5.2 Range Request Headers
+## 5.2 范围请求头部
 
-| Header | Purpose |
-|--------|---------|
-| `Accept-Ranges: bytes` | Indicates server supports range requests |
-| `Range: bytes=80-100` | Requests specific byte range; returns 206 Partial Content |
-| `If-Range` | Conditional range — only fulfilled if ETag/date matches |
-| `Content-Range` | Indicates position of partial content within full body |
+| 头部 | 用途 |
+|------|------|
+| `Accept-Ranges: bytes` | 指示服务器支持范围请求 |
+| `Range: bytes=80-100` | 请求特定字节范围；返回 206 Partial Content |
+| `If-Range` | 条件范围 — 仅在 ETag/日期匹配时执行 |
+| `Content-Range` | 指示部分内容在完整 body 中的位置 |
 
-> **Tip:** Remove `Accept-Encoding` from the request when using `Range` to avoid compressed responses interfering with byte-range calculations.
+> **提示：**使用 `Range` 时移除请求中的 `Accept-Encoding`，避免压缩响应干扰字节范围计算。
 
-### 5.2.1 Information Disclosure via Range + ETag
+### 5.2.1 通过 Range + ETag 实现信息泄露
 
-A critical information leak exists when `Range` and `ETag` are combined in HEAD requests against protected resources (401/403):
+当 `Range` 和 `ETag` 组合用于对受保护资源（401/403）的 HEAD 请求时，存在严重的信息泄露：
 
 ```http
 HEAD /protected/resource HTTP/1.1
@@ -227,42 +227,42 @@ Host: target.com
 Range: bytes=20-20
 ```
 
-Response:
+响应：
 ```http
 HTTP/1.1 206 Partial Content
 ETag: W/"1-eoGvPlkaxxP4HqHv6T3PNhV9g3Y"
 ```
 
-The `ETag` reveals the **SHA1 hash of byte 20** of the protected resource. By iterating through byte positions, an attacker can reconstruct the content of access-restricted pages byte by byte — without ever receiving the body.
+`ETag` 揭示了受保护资源**第 20 字节的 SHA1 哈希**。通过遍历字节位置，攻击者可以逐字节重建受访问限制页面的内容 — 而无需接收响应体。
 
-## 5.3 Message Body Metadata
+## 5.3 消息体元数据
 
-| Header | Purpose | Security Relevance |
-|--------|---------|-------------------|
-| `Content-Length` | Body size in bytes | Request smuggling, information disclosure |
-| `Content-Type` | Media type of resource | MIME confusion attacks |
-| `Content-Encoding` | Compression algorithm | Bypass via compression oracle |
-| `Content-Language` | Intended human language | Content negotiation abuse |
-| `Content-Location` | Alternate location for returned data | Open redirect, SSRF |
+| 头部 | 用途 | 安全相关性 |
+|------|------|----------|
+| `Content-Length` | Body 字节大小 | 请求走私、信息泄露 |
+| `Content-Type` | 资源的媒体类型 | MIME 混淆攻击 |
+| `Content-Encoding` | 压缩算法 | 通过压缩 Oracle 绕过 |
+| `Content-Language` | 目标人类语言 | 内容协商滥用 |
+| `Content-Location` | 返回数据的替代位置 | Open Redirect、SSRF |
 
-> **Note:** While usually benign, these headers become security-relevant when accessible on 401/403-protected resources — combined with Range+ETag techniques they can leak content metadata without authorization.
+> **注意：**虽然通常无害，但这些头部在 401/403 保护的资源上变得具有安全相关性 — 结合 Range+ETag 技术可在未经授权的情况下泄露内容元数据。
 
 ---
 
-# 0x06 Security Headers
+# 0x06 安全头部
 
-## 6.1 Content Security Policy (CSP)
+## 6.1 Content Security Policy（CSP）
 
-CSP controls which resources can be loaded and executed. Misconfiguration enables XSS. Full coverage in [CSP Bypass](../../User%20input/HTTP%20Headers/CSP%20Bypass/README.md).
+CSP 控制哪些资源可以被加载和执行。配置错误可导致 XSS。完整分析在 [CSP Bypass](../../User%20input/HTTP%20Headers/CSP%20Bypass/README.md)。
 
 ## 6.2 Trusted Types
 
-Enforced through CSP, Trusted Types prevent DOM XSS by requiring specifically crafted objects for dangerous DOM API calls:
+通过 CSP 强制实施，Trusted Types 通过要求为危险的 DOM API 调用提供符合既定安全策略的特定构造对象来防止 DOM XSS：
 
 ```javascript
-// Feature detection
+// 特性检测
 if (window.trustedTypes && trustedTypes.createPolicy) {
-  // Name and create a policy
+  // 命名并创建策略
   const policy = trustedTypes.createPolicy('escapePolicy', {
     createHTML: str => str.replace(/\</g, '&lt;').replace(/>/g, '&gt;');
   });
@@ -270,135 +270,135 @@ if (window.trustedTypes && trustedTypes.createPolicy) {
 ```
 
 ```javascript
-// Assignment of raw strings is blocked, ensuring safety.
-el.innerHTML = "some string" // Throws an exception.
+// 原始字符串赋值被阻止，确保安全。
+el.innerHTML = "some string" // 抛出异常。
 const escaped = policy.createHTML("<img src=x onerror=alert(1)>")
-el.innerHTML = escaped // Results in safe assignment.
+el.innerHTML = escaped // 产生安全的赋值。
 ```
 
-## 6.3 Other Security Headers
+## 6.3 其他安全头部
 
-| Header | Value | Purpose |
-|--------|-------|---------|
-| `X-Content-Type-Options` | `nosniff` | Prevents MIME type sniffing → blocks XSS via mis-typed resources |
-| `X-Frame-Options` | `DENY` / `SAMEORIGIN` | Prevents clickjacking by restricting frame embedding |
-| `Cross-Origin-Resource-Policy` | `same-origin` | Controls which sites can load this resource (mitigates cross-site leaks) |
-| `Access-Control-Allow-Origin` | `<origin>` | CORS: allows cross-origin access from specified origin |
-| `Access-Control-Allow-Credentials` | `true` | CORS: allows credentialed cross-origin requests |
-| `Cross-Origin-Embedder-Policy` | `require-corp` | Controls cross-origin resource embedding (Spectre mitigation) |
-| `Cross-Origin-Opener-Policy` | `same-origin-allow-popups` | Controls cross-origin window interaction (Spectre mitigation) |
-| `Strict-Transport-Security` | `max-age=3153600` | Forces HTTPS connections for the domain |
+| 头部 | 值 | 用途 |
+|------|-----|------|
+| `X-Content-Type-Options` | `nosniff` | 防止 MIME 类型嗅探 → 阻止通过错误类型资源的 XSS |
+| `X-Frame-Options` | `DENY` / `SAMEORIGIN` | 通过限制框架嵌入防止点击劫持 |
+| `Cross-Origin-Resource-Policy` | `same-origin` | 控制哪些站点可以加载此资源（缓解跨站泄露） |
+| `Access-Control-Allow-Origin` | `<origin>` | CORS：允许来自指定源的跨域访问 |
+| `Access-Control-Allow-Credentials` | `true` | CORS：允许带凭据的跨域请求 |
+| `Cross-Origin-Embedder-Policy` | `require-corp` | 控制跨域资源嵌入（Spectre 缓解） |
+| `Cross-Origin-Opener-Policy` | `same-origin-allow-popups` | 控制跨域窗口交互（Spectre 缓解） |
+| `Strict-Transport-Security` | `max-age=3153600` | 强制该域名使用 HTTPS 连接 |
 
-## 6.4 Permissions-Policy (formerly Feature-Policy)
+## 6.4 Permissions-Policy（原 Feature-Policy）
 
-`Permissions-Policy` selectively enables or disables browser features and APIs, reducing the attack surface exposed to XSS or malicious iframes:
+`Permissions-Policy` 选择性地启用或禁用浏览器特性和 API，减少 XSS 或恶意 iframe 暴露的攻击面：
 
 ```
 Permissions-Policy: geolocation=(), camera=(), microphone=()
 ```
 
-**Common directives:**
+**常用指令：**
 
-| Directive | Description |
-|-----------|-------------|
-| `accelerometer` | Accelerometer sensor access |
-| `camera` | Video input (webcam) access |
-| `geolocation` | Geolocation API access |
-| `gyroscope` | Gyroscope sensor access |
-| `magnetometer` | Magnetometer sensor access |
-| `microphone` | Audio input access |
-| `payment` | Payment Request API access |
-| `usb` | WebUSB API access |
-| `fullscreen` | Fullscreen API access |
-| `autoplay` | Media autoplay control |
-| `clipboard-read` | Read clipboard content |
-| `clipboard-write` | Write to clipboard |
+| 指令 | 描述 |
+|------|------|
+| `accelerometer` | 加速度传感器访问 |
+| `camera` | 视频输入（摄像头）访问 |
+| `geolocation` | 地理位置 API 访问 |
+| `gyroscope` | 陀螺仪传感器访问 |
+| `magnetometer` | 磁力计传感器访问 |
+| `microphone` | 音频输入访问 |
+| `payment` | Payment Request API 访问 |
+| `usb` | WebUSB API 访问 |
+| `fullscreen` | 全屏 API 访问 |
+| `autoplay` | 媒体自动播放控制 |
+| `clipboard-read` | 读取剪贴板内容 |
+| `clipboard-write` | 写入剪贴板 |
 
-**Syntax:**
+**语法：**
 
-| Value | Effect |
-|-------|--------|
-| `()` | Disables the feature entirely |
-| `(self)` | Allows only same-origin use |
-| `*` | Allows all origins |
-| `(self "https://example.com")` | Allows same-origin plus specified domain |
+| 值 | 效果 |
+|----|------|
+| `()` | 完全禁用该特性 |
+| `(self)` | 仅允许同源使用 |
+| `*` | 允许所有源 |
+| `(self "https://example.com")` | 允许同源加指定域名 |
 
-**Example configurations:**
+**配置示例：**
 
 ```
-# Restrictive — disable most features
+# 严格策略 — 禁用大部分特性
 Permissions-Policy: geolocation=(), camera=(), microphone=(), payment=(), usb=()
 
-# Allow camera only from same origin
+# 仅允许同源使用摄像头
 Permissions-Policy: camera=(self)
 
-# Allow geolocation for same origin and a trusted partner
+# 允许同源及可信合作伙伴使用地理位置
 Permissions-Policy: geolocation=(self "https://maps.example.com")
 ```
 
-> **Security impact:** Missing or overly permissive `Permissions-Policy` headers allow attackers (via XSS or embedded iframes) to abuse powerful browser features. Always restrict to the minimum necessary.
+> **安全影响：**缺失或过于宽松的 `Permissions-Policy` 头部允许攻击者（通过 XSS 或嵌入 iframe）滥用强大的浏览器特性。始终限制到应用所需的最小范围。
 
 ---
 
-# 0x07 Header Name Casing Bypass
+# 0x07 Header 名称大小写绕过
 
-## 7.1 Mechanism
+## 7.1 机制
 
-HTTP/1.1 defines header field-names as **case-insensitive** (RFC 9110 §5.1). However, custom middleware, security filters, or business logic frequently compare the **literal** header name without normalizing casing first. If checks are performed **case-sensitively**, an attacker bypasses them by sending the same header with different capitalization.
+HTTP/1.1 定义头部字段名为**大小写不敏感**（RFC 9110 §5.1）。然而，自定义中间件、安全过滤器或业务逻辑经常在未规范化大小写的情况下**逐字**比较头部名称。如果检查是**大小写敏感**的，攻击者可以通过以不同的大小写组合发送相同头部来绕过。
 
-Typical vulnerable patterns:
+典型的易受攻击模式：
 
-- Custom allow/deny lists blocking "dangerous" internal headers before they reach sensitive components
-- In-house reverse-proxy pseudo-header sanitization (e.g., `X-Forwarded-For` filtering)
-- Frameworks exposing management/debug endpoints that rely on header names for authentication or command selection
+- 自定义允许/拒绝列表试图在请求到达敏感组件前阻止"危险"内部头部
+- 自研反向代理伪头部的净化处理（如 `X-Forwarded-For` 过滤）
+- 框架暴露依赖头部名称进行认证或命令选择的管理/调试端点
 
-## 7.2 Exploitation Pattern
+## 7.2 利用模式
 
-1. Identify a header that is filtered or validated server-side (source code, documentation, error messages)
-2. Send the **same header with different casing** (mixed-case or upper-case) — HTTP stacks canonicalize headers only **after** user code runs, so the vulnerable check is skipped
-3. The downstream component treats headers case-insensitively (as most do) and accepts the attacker-controlled value
+1. 识别服务端过滤或验证的头部（通过源代码、文档、错误消息）
+2. 以**不同大小写**（混合大小写或全大写）发送**相同头部** — HTTP 栈仅在**用户代码运行后**才规范化头部，因此易受攻击的检查被跳过
+3. 下游组件以大小写不敏感的方式处理头部（大多数如此）并接受攻击者控制的值
 
 ## 7.3 CVE-2025-27636 — Apache Camel `exec` RCE
 
-In vulnerable versions of Apache Camel, the *Command Center* routes attempt to block untrusted requests by stripping the headers `CamelExecCommandExecutable` and `CamelExecCommandArgs`. The comparison used `equals()` — only the exact lowercase names were removed.
+在 Apache Camel 存在漏洞的版本中，*Command Center* 路由试图通过剥离 `CamelExecCommandExecutable` 和 `CamelExecCommandArgs` 头部来阻止未受信任的请求。比较使用的是 `equals()` — 只有精确匹配的小写名称被移除。
 
 ```bash
-# Bypass the filter by using mixed-case header names and execute 'ls /' on the host
+# 通过混合大小写的头部名称绕过过滤器，在主机上执行 'ls /'
 curl "http://<IP>/command-center" \
   -H "CAmelExecCommandExecutable: ls" \
   -H "CAmelExecCommandArgs: /"
 ```
 
-The headers reach the `exec` component unfiltered, resulting in **remote command execution** with the privileges of the Camel process.
+头部未经过滤到达 `exec` 组件，导致以 Camel 进程权限执行**远程命令**。
 
-## 7.4 Detection & Mitigation
+## 7.4 检测与缓解
 
-- **Normalize** all header names to a single case (usually lowercase) **before** performing allow/deny comparisons
-- Reject suspicious duplicates: if both `Header:` and `HeAdEr:` are present, treat as an anomaly
-- Use a **positive allow-list** enforced **after** canonicalization
-- Protect management endpoints with authentication and network segmentation
+- 在执行允许/拒绝比较**之前**将所有头部名称**规范化**到单一大小写（通常为小写）
+- 拒绝可疑的重复头部：如果同时存在 `Header:` 和 `HeAdEr:`，视为异常
+- 使用**白名单**机制，在**规范化之后**执行
+- 通过认证和网络分段保护管理端点
 
 ---
 
-# 0x08 Server Info & Controls
+# 0x08 服务器信息与控制头部
 
-## 8.1 Server Information Headers
+## 8.1 服务器信息头部
 
 ```
 Server: Apache/2.4.1 (Unix)
 X-Powered-By: PHP/5.3.3
 ```
 
-These expose exact software versions, aiding targeted exploitation. Strip or obfuscate in production.
+这些暴露了精确的软件版本，有助于针对性利用。生产环境中应剥离或混淆。
 
-## 8.2 Control Headers
+## 8.2 控制头部
 
-- **`Allow: GET, POST, HEAD`** — Communicates supported HTTP methods for a resource. Reconnaissance value: identifies writable endpoints (PUT, DELETE enabled).
-- **`Expect: 100-continue`** — Client expectation signaling before large body transmission. See §3.3 for smuggling and desync behaviors.
+- **`Allow: GET, POST, HEAD`** — 传达资源支持的 HTTP 方法。侦察价值：识别可写端点（PUT、DELETE 已启用）。
+- **`Expect: 100-continue`** — 大数据传输前客户端期望信号。参见 §3.3 了解走私和去同步行为。
 
 ## 8.3 Content-Disposition
 
-The `Content-Disposition` header controls whether a file is displayed inline or downloaded:
+`Content-Disposition` 头部控制文件是内联显示还是作为下载处理：
 
 ```
 Content-Disposition: attachment; filename="filename.jpg"
@@ -412,6 +412,6 @@ Content-Disposition: attachment; filename="filename.jpg"
 - [MDN — Content-Disposition](https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Content-Disposition)
 - [MDN — HTTP Headers Reference](https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers)
 - [web.dev — Security Headers](https://web.dev/security-headers/)
-- [web.dev — Security Headers (Articles)](https://web.dev/articles/security-headers)
-- [SecLists — HTTP Request Headers Wordlist](https://github.com/danielmiessler/SecLists/tree/master/Miscellaneous/Web/http-request-headers)
-- [humble — HTTP Header Fuzzer](https://github.com/rfc-st/humble)
+- [web.dev — Security Headers（文章）](https://web.dev/articles/security-headers)
+- [SecLists — HTTP Request Headers 字典](https://github.com/danielmiessler/SecLists/tree/master/Miscellaneous/Web/http-request-headers)
+- [humble — HTTP Header 模糊测试工具](https://github.com/rfc-st/humble)
