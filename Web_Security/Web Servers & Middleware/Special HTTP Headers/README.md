@@ -27,7 +27,7 @@ tools:
 
 # Special HTTP Headers — HTTP Header-Based Attack Techniques — HTTP 特殊头部攻击技术
 
-> 关联文档：[HTTP Request Smuggling](../HTTP%20Request%20Smuggling/README.md) · [Abusing Hop-by-Hop Headers](../Abusing%20hop-by-hop%20headers/README.md) · [Cache Deception](../Cache%20Poisoning%26Cache%20Deception/README.md) · [CSP Bypass](../../User%20input/HTTP%20Headers/CSP%20Bypass/README.md) · [WAF Bypass](../Proxy%20&%20WAF%20Protections%20Bypass/README.md)
+> 关联文档：[HTTP Request Smuggling](../../Proxies/HTTP%20Request%20Smuggling/README.md) · [Abusing Hop-by-Hop Headers](../../Proxies/Abusing%20hop-by-hop%20headers/README.md) · [Cache Deception](../../Proxies/Cache%20Poisoning%26Cache%20Deception/README.md) · [CSP Bypass](../../User%20input/HTTP%20Headers/CSP%20Bypass/README.md) · [WAF Bypass](../../Proxies/Proxy%20&%20WAF%20Protections%20Bypass/README.md)
 
 ---
 
@@ -101,7 +101,7 @@ Via: 1.0 fred, 1.1 127.0.0.1
 Connection: close, X-Forwarded-For
 ```
 
-> **注意：**`Connection: close, X-Forwarded-For` 利用了 hop-by-hop 头部行为 — 参见 §3.1 和 [Abusing Hop-by-Hop Headers](../Abusing%20hop-by-hop%20headers/README.md)。
+> **注意：**`Connection: close, X-Forwarded-For` 利用了 hop-by-hop 头部行为 — 参见 §3.1 和 [Abusing Hop-by-Hop Headers](../../Proxies/Abusing%20hop-by-hop%20headers/README.md)。
 
 ## 2.3 URL/位置重写头部
 
@@ -130,7 +130,7 @@ Connection: close, X-Forwarded-For
 
 这导致代理在转发前剥离 `X-Forwarded-For`。反之，如果省略代理期望的 hop-by-hop 头部，可能导致意外的转发行为。
 
-> **深度分析：**[Abusing Hop-by-Hop Headers](../Abusing%20hop-by-hop%20headers/README.md)
+> **深度分析：**[Abusing Hop-by-Hop Headers](../../Proxies/Abusing%20hop-by-hop%20headers/README.md)
 
 ## 3.2 HTTP Request Smuggling 头部
 
@@ -141,7 +141,7 @@ Content-Length: 30
 Transfer-Encoding: chunked
 ```
 
-前端代理和后端服务器解析 `Content-Length` 与 `Transfer-Encoding` 的差异创造了在 [HTTP Request Smuggling](../HTTP%20Request%20Smuggling/README.md) 中被利用的去同步机会。
+前端代理和后端服务器解析 `Content-Length` 与 `Transfer-Encoding` 的差异创造了在 [HTTP Request Smuggling](../../Proxies/HTTP%20Request%20Smuggling/README.md) 中被利用的去同步机会。
 
 ## 3.3 Expect 头部
 
@@ -159,7 +159,7 @@ Transfer-Encoding: chunked
 - **Expect 变体去同步：**发送 `Expect: y 100-continue`（非标准变体）同样触发 0.CL 去同步。
 - **CL.0 去同步：**当后端以 404 响应时，恶意请求的 `Content-Length` 导致后端将下一个受害者请求的字节作为 body 消费。后端发送两个响应（恶意请求的 404 + 受害者响应），但前端仅期望一个响应 — 第二个响应与后续受害者请求配对，造成持久化的响应队列去同步。
 
-> **完整分析：**[HTTP Request Smuggling](../HTTP%20Request%20Smuggling/README.md)
+> **完整分析：**[HTTP Request Smuggling](../../Proxies/HTTP%20Request%20Smuggling/README.md)
 
 ---
 
@@ -185,7 +185,7 @@ Transfer-Encoding: chunked
 | `Pragma: no-cache` | `Cache-Control: no-cache` 的遗留等价形式 |
 | `Warning: 110 anderson/1.3.37 "Response is stale"` | 指示缓存响应状态可能存在的问题 |
 
-> **深度分析：**[Cache Deception](../Cache%20Poisoning%26Cache%20Deception/README.md)
+> **深度分析：**[Cache Deception](../../Proxies/Cache%20Poisoning%26Cache%20Deception/README.md)
 
 ---
 
