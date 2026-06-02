@@ -371,6 +371,14 @@ curl "http://<IP>/command-center" \
 
 头部未经过滤到达 `exec` 组件，导致以 Camel 进程权限执行**远程命令**。
 
+### 7.3.1 条件
+
+- Apache Camel 实例必须解析包含 `exec` 组件的 XML 路由
+- 运行时环境必须允许进程执行
+- Command Center 端点可通过 HTTP 访问（无需认证或凭据已知）
+
+> **公开 PoC**：[Akamai CVE-2025-27636 PoC](https://github.com/akamai/akamai-security-research/tree/main/CVE-2025-27636)
+
 ## 7.4 检测与缓解
 
 - 在执行允许/拒绝比较**之前**将所有头部名称**规范化**到单一大小写（通常为小写）

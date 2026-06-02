@@ -266,6 +266,8 @@ http://www.vulnerable.com/;param=value/manager/html
 
 Tomcat 的 `org.apache.catalina.connector.CoyoteAdapter` 将 `;param=value` 解析为附加到根 `/` 的路径参数，保留对分号段后目标路径的访问。这绕过了匹配字面路径前缀的反向代理规则。
 
+> **防御**：配置反向代理拒绝包含 Tomcat 路径参数字符 `;` 的路径。
+
 同样的解析行为也是 Tomcat 出现在 [WAF Bypass](../../Proxies/Proxy%20&%20WAF%20Protections%20Bypass/README.md) 上下文中的原因 — `;` 在 Tomcat 中作为路径分隔符但在前端代理中不是，创造了过滤器绕过机会。Spring MVC + Tomcat 的 [Parameter Pollution](../../Other%20Helpful%20Vulnerabilities/Parameter%20Pollution/README.md) 行为（重复参数的逗号拼接）在许多部署中加剧了这一问题。
 
 ---

@@ -314,6 +314,7 @@ wget --user <USERNAME> --ask-password http://domain/path/to/webdav/ -O - -q
 
 | 工具 | 用途 | 参考 |
 |------|------|------|
+| `webdav_scanner`（MSF） | 识别 WebDAV 是否启用 | `auxiliary/scanner/http/webdav_scanner` |
 | `davtest` | 自动化 WebDAV 扩展名测试 | Kali 内置 |
 | `cadaver` | 交互式 WebDAV 客户端 | Kali 内置 |
 | `curl` | 原始 HTTP PUT/MOVE/DELETE | 内置 |
