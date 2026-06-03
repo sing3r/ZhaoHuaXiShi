@@ -27,7 +27,7 @@ tools:
 
 # Flask — Flask Web Framework Attack Surface — Flask Web 框架攻击面
 
-> 关联文档：[Werkzeug Debug Exposure](../Werkzeug%20Debug%20Exposure/README.md) · [SSTI](../../User%20input/Reflected%20Values/SSTI/README.md) · [SSRF](../../User%20input/Reflected%20Values/SSRF/README.md) · [SQL Injection](../../User%20input/Search/SQL%20Injection/README.md) · [Python Sandbox Bypass](../../../hacktricks/generic-methodologies-and-resources/python/bypass-python-sandboxes/README.md)
+> 关联文档：[Werkzeug Debug Exposure](../Web%20Servers%20&%20Middleware/Werkzeug%20Debug%20Exposure/README.md) · [SSTI](../../User%20input/Reflected%20Values/SSTI/README.md) · [SSRF](../../User%20input/Reflected%20Values/SSRF/README.md) · [SQL Injection](../../User%20input/Search/SQL%20Injection/README.md) · [Python Sandbox Bypass](../../../hacktricks/generic-methodologies-and-resources/python/bypass-python-sandboxes/README.md)
 
 ---
 
