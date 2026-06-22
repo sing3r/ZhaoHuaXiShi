@@ -155,7 +155,7 @@ CVE-2022-1388 是 2022 年最高危漏洞之一，野外利用在漏洞公开后
 2. Apache 前端与 Java 后端之间存在**信任边界模糊**——后端假设前端已验证
 3. Apache 对 hop-by-hop 头的**合规处理**创造了清除认证令牌的通道
 
-## 5.2 各代理/中间件对 hop-by-hop 请求头的处理
+## 5.2 各代理/负载均衡器对 hop-by-hop 请求头的处理
 
 | 组件 | 是否按规范处理 hop-by-hop | 备注 |
 |------|--------------------------|------|
@@ -169,7 +169,7 @@ CVE-2022-1388 是 2022 年最高危漏洞之一，野外利用在漏洞公开后
 | **Envoy** | ❌ 否 | 默认透传，需通过 Lua filter 或 WASM 扩展处理 |
 | **F5 BIG-IP (Apache 前端)** | ✅ 是 | 与 Apache httpd 行为一致，触发了自身的漏洞 |
 
-> **结论**：当前环境下仅 **Apache httpd** 和基于 Apache 的组件会主动按规范消费 hop-by-hop 头。大部分现代反向代理（Nginx/HAProxy/Envoy）默认透传。因此利用 hop-by-hop 绕过前需先确认前端代理类型。Nginx 通常需要额外配置 `proxy_set_header Connection ""` 才具备同样的安全风险。
+> **结论**：当前环境下仅 **Apache httpd** 和基于 Apache 的组件会主动按规范消费 hop-by-hop 头（这是 Apache 对 RFC 的合规实现，而非漏洞）。大部分现代反向代理（Nginx/HAProxy/Envoy）默认透传 hop-by-hop 头。因此利用 hop-by-hop 绕过前需先确认前端代理类型：Apache 天然可利用，Nginx 需额外配置才引入同等风险，其他代理通常不受影响。
 
 # 0x06 参考
 
