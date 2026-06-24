@@ -247,20 +247,69 @@ GET /js/geolocate.js?callback=setCountryCookie&utm_content=foo;callback=arbitrar
 
 靶场：[portswigger.net/web-security/web-cache-poisoning/exploiting-implementation-flaws/lab-web-cache-poisoning-param-cloaking](https://portswigger.net/web-security/web-cache-poisoning/exploiting-implementation-flaws/lab-web-cache-poisoning-param-cloaking)
 
-## 6.2 URL 规范化差异 — ChatGPT API Key 窃取
+## 6.2 URL 规范化差异 — ChatGPT 账户接管（Wildcard Web Cache Deception）
 
-真实案例：OpenAI ChatGPT 缓存攻击（nokline 报告）。
+**案例来源**：nokline 报告，赏金 $6,500。这是 **Web Cache Deception**（缓存欺骗），不是投毒——受害者的敏感数据被缓存，攻击者再读取。
 
-- CDN 缓存 `/share/` 下所有内容，但**不解码也不规范化** `%2F..%2F`
-- Web 服务器解码并规范化，响应 `/api/auth/session`（**包含 auth token 的 JSON**）
+### 发现过程：通配缓存规则
+
+ChatGPT 实现了"分享"功能（`/share/` 路径），允许用户公开分享对话。在测试过程中发现：
+
+1. 与 ChatGPT 继续对话后，分享链接的内容**不更新**——这是缓存行为的症状
+2. 检查响应头：`Cf-Cache-Status: HIT`（Cloudflare 缓存命中）
+3. 验证：`/share/random-path-that-does-not-exist` 也被缓存
+
+**结论**：Cloudflare 配置了一条通配缓存规则 `/share/*` —— **任何**以 `/share/` 开头的路径都会被 CDN 缓存，无论内容类型、无论文件扩展名。这是一个极其危险的宽松规则。
+
+### 攻击链：URL 编码路径遍历
+
+**关键不一致**：请求经过两步 URL 解析——CDN 解析一次，源站 Web 服务器再解析一次：
+
+| 层 | 对 `%2F..%2F` 的处理 | 结果 |
+|----|---------------------|------|
+| **Cloudflare CDN** | **不解码**，**不规范化** `%2F..%2F` | 视为纯字符串 → 匹配 `/share/*` 规则 → 缓存 |
+| **Origin Web Server** | **解码** `%2F` → `/`，**规范化** `..` 进行路径遍历 | 实际解析为 `/api/auth/session` |
+
+**Payload**：
 
 ```
 https://chat.openai.com/share/%2F..%2Fapi/auth/session?cachebuster=123
 ```
 
-1. CDN 将请求匹配到 `/share/*` 路径 → 缓存
-2. Web 服务器处理后访问 `/api/auth/session` → 返回包含 auth token 的 JSON
-3. 攻击者访问同一路径 → 从 CDN 缓存中获取受害者 auth token
+### 分步拆解
+
+**第 1 步**：受害者访问恶意链接（攻击者通过社工发送，或嵌入钓鱼页面）
+
+```
+GET /share/%2F..%2Fapi/auth/session?cachebuster=123 HTTP/1.1
+Host: chat.openai.com
+Cookie: <受害者的认证 Cookie>
+```
+
+**第 2 步**：CDN 处理
+- 看到路径以 `/share/` 开头 → 匹配 `/share/*` 通配缓存规则
+- 不解码 `%2F`，不规范化 `..` → 视为原始字符串
+- 将请求转发给源站、缓存源站的响应，缓存键为 `/share/%2F..%2Fapi/auth/session?cachebuster=123`
+
+**第 3 步**：源站处理
+- 解码 `%2F` → `/` + 规范化路径遍历 → 实际路径 = `/api/auth/session`
+- 受害者认证 Cookie 随请求发送 → 源站返回**包含受害者 auth token 的 JSON**
+- 响应内容被 CDN 缓存
+
+**第 4 步**：攻击者检索
+- 攻击者访问同一 URL：`https://chat.openai.com/share/%2F..%2Fapi/auth/session?cachebuster=123`
+- CDN 缓存命中 → 直接返回缓存的响应 → 攻击者获取受害者 auth token
+- 使用 auth token → **完整账户接管**（查看对话、账单信息、API 密钥）
+
+### 为什么是 Wildcard
+
+与普通 Web Cache Deception（需要追加 `.css`/`.js` 等静态扩展名）不同，这里的 `/share/*` 规则完全不检查扩展名。只要路径以 `/share/` 开头就缓存——路径遍历可以逃逸到服务器上的**任意端点**，使任何敏感 API（`/api/auth/session`、`/api/user/profile` 等）都能被缓存。
+
+### 关键要点
+
+- 通配缓存规则（`/share/*`）比扩展名规则（`*.css`）危险得多——不需要静态扩展名伪装
+- CDN 和源站的 URL 解析分歧是 Deception 的核心：CDN 认为资源在 `/share/` 下（可缓存），源站实际处理的是 `/api/auth/session`（敏感端点）
+- `cachebuster=123` 用于确保缓存的是攻击者控制的版本，不与正常访问者的缓存混淆
 
 > **分隔符速查表**：
 > | 字符 | 框架 | 效果 |
