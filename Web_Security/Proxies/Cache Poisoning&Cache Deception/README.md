@@ -507,15 +507,63 @@ x=1
 
 ## 9.2 并行请求播种 (Cache Seeding)
 
-针对 `User-Agent` 反射 + CDN 自动缓存 `.js` 后缀的竞争条件：
+### 威胁模型
+
+缓存播种（Cache Seeding）利用 CDN 并发处理请求时的时序竞争，将**未缓存键控制的响应**错误地关联到**正常请求的缓存键**上。攻击需要三个前提：
+
+1. 存在一个**反射型 XSS 向量**（如 `User-Agent` 头反射到响应中），且该头**不参与缓存键**
+2. CDN 配置了**基于扩展名/路径的自动缓存规则**（如 `.js` 后缀默认缓存）
+3. 攻击者能**并发发送请求**，竞争 CDN 内部的缓存槽位分配
+
+### 攻击机制
+
+CDN 在处理并发请求时，内部流程大致为：
+
+1. 收到请求 A → 检查缓存键 → 未命中 → 向源站发起回源请求 → 等待响应
+2. 收到请求 B → 检查缓存键 → 未命中 → 向源站发起回源请求 → 等待响应
+
+在高并发且 CDN 的缓存槽位锁机制不健壮时，可能出现以下竞态：
+
+- 请求 A（`GET /index.php/script.js`，带恶意 `User-Agent: "><script>stealCookies()</script>`）
+  - CDN 看到 `.js` 后缀 → 标记为"可缓存"
+  - 向源站发起回源
+- 请求 B（`GET /`，正常请求，无特殊 UA）
+  - CDN 看到 `/` → 同样是可缓存页面
+  - 几乎同时向源站发起回源
+
+**竞争点**：两个响应几乎同时从源站返回。如果 CDN 在处理时未正确隔离两个缓存槽位的写入操作，可能出现：
+
+> 请求 A（带恶意 UA → 源站返回含 XSS 的网页）的响应体被错误地写入请求 B（`/` 缓存键）的缓存槽
+
+结果：访问首页 `/` 的所有用户获得包含恶意反射 XSS 的响应——攻击者将带毒的响应"播种"到了与攻击请求不同的缓存键中。
+
+### PortSwigger 靶场示例
+
+PortSwigger Web Security Academy 有专门的缓存播种实验。典型场景：
+
+1. 目标站点将 `User-Agent` 反射到页面中且不参与缓存键
+2. CDN 配置自动缓存所有 `.js` 结尾的 URL
+3. 攻击路径：`/index.php/script.js` → 源站忽略 `/script.js` → 响应实际是 `/index.php` 内容
+4. 通过单包并发（Single-packet attack）同时发送：
+   - 请求 A：`GET /index.php/script.js` + 恶意 UA（含 XSS payload）
+   - 请求 B：`GET /`（普通 UA，模拟正常用户）
+5. 竞态导致请求 A 的毒化响应被写入请求 B 的缓存槽 → 首页被全局投毒
 
 ```http
-GET /script.js HTTP/1.1
+# 请求 A — 向毒化源站，带恶意 UA（被反射到响应中）
+GET /index.php/script.js HTTP/1.1
 Host: cdn.target.com
 User-Agent: "><script>stealCookies()</script>
+
+# 请求 B — 同时发送的清理请求，目标是首页缓存
+GET / HTTP/1.1
+Host: cdn.target.com
+User-Agent: Mozilla/5.0 (normal browser)
 ```
 
-使用 Burp "Send group in parallel"（单包模式）发送恶意 UA 请求 + 正常请求，利用并发处理中的缓存槽位分配时序漏洞。
+使用 Burp Suite 的 "Send group in parallel (single-packet attack)" 模式实现两者同时发送到 CDN。
+
+> **真实案例参考**：PortSwigger 研究团队在 [Practical Web Cache Poisoning](https://portswigger.net/research/practical-web-cache-poisoning) 中首次描述了该技术。虽未披露具体受影响企业，但该技术已在多个漏洞赏金项目中成功利用，目标包括使用了基于扩展名的激进缓存策略（如缓存所有 `.js`/`.css`/`.png` URL）的 CDN 部署。
 
 ## 9.3 Sitecore XAML 预认证投毒 → RCE
 
