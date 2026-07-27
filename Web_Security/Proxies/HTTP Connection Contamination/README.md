@@ -97,6 +97,40 @@ HTTP Connection Contamination 是两个独立特性**碰撞**产生的结果：
   8. 攻击者读取 secure.example.com 下的 Cookie/密码/Token
 ```
 
+## 1.4 流程图
+
+```mermaid
+sequenceDiagram
+    participant B as 浏览器
+    participant RP as 反向代理 (first-request routing)
+    participant WP as WordPress 后端
+    participant SC as 安全应用后端
+
+    Note over B: HTTP/2 连接合并
+
+    B->>RP: HTTP/2 连接建立<br/>TLS: *.example.com 通配符证书
+
+    rect rgb(230, 245, 255)
+        Note over B,RP: 请求 1
+        B->>RP: GET / HTTP/1.1<br/>Host: wordpress.example.com
+        RP->>RP: 首请求路由：<br/>分析 Host → 路由到 WordPress 后端
+        RP->>WP: 转发请求
+        WP-->>B: 响应 (WordPress 页面)
+    end
+
+    rect rgb(255, 240, 240)
+        Note over B,RP: 请求 2 (同一连接复用)
+        B->>RP: GET / HTTP/1.1<br/>Host: secure.example.com
+        Note over RP: ⚠ 首请求路由<br/>不再分析 Host<br/>仍路由到 WordPress 后端
+        RP->>WP: 误路由：本该去安全后端<br/>实际去了 WordPress
+        WP-->>B: 响应 (例如含 XSS 注入的页面)
+    end
+
+    Note over B: 浏览器认为响应来自<br/>secure.example.com<br/>同源策略放行
+
+    Note over B,SC: 攻击者通过 WordPress 的 XSS<br/>读取 secure.example.com 的 Cookie/密码
+```
+
 ---
 
 # 0x02 攻击前置条件
