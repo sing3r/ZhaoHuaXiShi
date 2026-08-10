@@ -71,6 +71,8 @@ RFC 7230 定义了 HTTP/1.1 的 `Upgrade` 机制：客户端发送 `Upgrade` 头
 
 H2C（HTTP/2 over cleartext）是在无 TLS 保护下运行 HTTP/2 的实现。与通过 TLS-ALPN 协商的 HTTP/2（h2）不同，H2C 依赖 HTTP/1.1 的 `Upgrade` 机制进行协商。
 
+> 2020 年底，PortSwigger 将 H2C Smuggling 评为**年度十大 Web Hacking 技术之首**（Top 10 Web Hacking Techniques of 2020），Assetnote 的云服务商发现进一步验证了这一排名的准确性。
+
 ## 2.1 攻击原理与流程
 
 ### 2.1.1 协议升级过程
@@ -84,6 +86,8 @@ H2C（HTTP/2 over cleartext）是在无 TLS 保护下运行 HTTP/2 的实现。�
 6. 代理盲传所有帧到后端
 7. 后端正常响应（包括被代理禁止的路径）
 ```
+
+> **多层代理场景**：Jake Miller 通过独立实验确认，即使存在多层代理链，只要每一层代理都成功转发了所需的 Upgrade/Connection 头部，攻击仍会成功——数据沿各代理依次建立的 TCP 隧道逐层透传。
 
 ### 2.1.2 初始升级请求
 
@@ -128,7 +132,7 @@ Connection: Upgrade
 以下代理在 `proxy_pass` 期间**默认转发** `Upgrade` 和 `Connection` 头部，无需特殊配置即可启用 H2C 走私：
 
 - **HAProxy**（`mode http`）
-- **Traefik**
+- **Traefik**（注意：Traefik 不会在转发的 `Connection` 字符串中包含 `HTTP2-Settings`，可能导致在某些严格的 h2c 后端实现上攻击失败）
 - **Nuster**
 
 ### 需特殊配置 — 潜在风险
@@ -144,6 +148,10 @@ Connection: Upgrade
 - Apache Traffic Server
 
 > **注意**：即使代理尝试过滤 `HTTP2-Settings`，若后端实现不严，攻击者使用精简的 `Connection: Upgrade` 变体仍可能成功。Assetnote 修改了 `net/http/h2c` 库，仅检查 `Upgrade: h2c` 即接受升级。
+
+### 后端 H2C 支持场景
+
+H2C 因其带宽优势和避免 TLS 管理开销，在微服务内网通信中颇具吸引力。流行的 Web 框架（如 Golang `net/http`、gRPC）常提供 H2C 配置选项，尽管很少作为默认开启。在前端代理配置不安全的前提下，内网微服务中 H2C 的使用会显著增加攻击成功概率——攻击者一旦通过代理建立隧道，即可在微服务网格中横向移动。
 
 一旦隧道建立，代理的所有 L7 安全策略（WAF 规则、路径 ACL、认证校验）均被绕过，使攻击者可直达后端任意路径——这是 [Proxy & WAF Protections Bypass](../Proxy%20%26%20WAF%20Protections%20Bypass/README.md) 的高级利用形式。
 
@@ -299,6 +307,7 @@ Connection: Keep-Alive
 - 即使是顶级安全研究人员的成果，也可能存在进一步扩展的空间。
 - 云负载均衡器的安全配置不能替代后端防护。
 - Assetnote 在现有客户中发现多个允许 H2C 升级的实例，可能绕过反向代理的访问控制。
+- 除已披露的 Cloudflare 和 Azure 外，还存在其他未具名云服务商受此漏洞影响（发布时未获披露许可）。
 
 ---
 
@@ -315,6 +324,12 @@ Connection: Keep-Alive
 - **H2C 变形探测**：发送不合规的 `Connection: Upgrade`（排除 `HTTP2-Settings`），测试后端是否严格遵循 RFC。
 - **多端点测试**：每个 `proxy_pass` 端点需单独验证。`/api/` 路径比 `/` 更可能是升级端点。
 - **误报识别**：某些服务返回 `101` 但不支持 HTTP/2 通信（随后返回 TCP ACK/RST）。需确认后续 HTTP/2 帧是否得到正确响应。
+
+### 利用技巧
+
+- **HTTP/2 多路复用暴力枚举**：使用 h2csmuggler 的 `-i` 选项可高速枚举内部端点（比传统 HTTP/1.1 逐请求枚举快数个数量级）。
+- **内部头部伪造**：由于绕过了代理，请求可能缺少后端期望的头部。可使用 [param-miner](https://github.com/PortSwigger/param-miner) 的头部列表作为伪造内部头部的参考（如 `X-Forwarded-*`、`X-Real-IP` 等）。
+- **错误消息侦察**：后端返回的错误消息中可能暴露所需的头部信息，用于成功构造内部请求。
 
 ## 5.2 WebSocket 走私检测
 
