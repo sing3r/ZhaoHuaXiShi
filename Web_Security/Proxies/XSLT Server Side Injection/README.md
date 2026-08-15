@@ -27,6 +27,8 @@ XSLT（Extensible Stylesheet Language Transformations）是一种用于将 XML �
 
 **漏洞前提**：应用程序允许攻击者控制 XSL 样式表内容——典型场景包括上传 `.xsl`/`.xslt` 文件、在 ESI 标签中指定外部样式表 URL、或通过用户输入拼接到 XSL 模板中。当 XSLT 处理器解析攻击者构造的样式表时，内嵌的恶意指令（`document()`、`unparsed-text()`、`php:function()`、`xsl:include` 等）会在服务端执行。
 
+> **注意 — 上传场景的闭环前提**：单独能上传 `.xsl`/`.xslt` 文件**不构成漏洞**，必须存在**引用环节**——某个转换功能真的应用攻击者上传的样式表（如报表模板定制、文档转换过滤器、`?template=` 类参数、ESI 的 `stylesheet` 属性）。两类闭环模式的详细分析见 [XSLT 基础知识](XSLT%20基础知识.md) §0.4。
+
 > **注意**：XSLT 注入不等同于 [XXE](../../User%20input/Structured%20objects/XXE/README.md)。虽然两者都涉及 XML 处理，但 XSLT 注入的攻击面来自 XSLT 处理器自身的扩展函数和指令集，即便 XML 解析器已禁用外部实体（`resolve_entities=False`、`no_network=True`），XSLT 处理器的危险功能仍可能独立生效。
 
 ## 1.2 Parser Asymmetry：XML 已加固，XSLT 仍可攻击
