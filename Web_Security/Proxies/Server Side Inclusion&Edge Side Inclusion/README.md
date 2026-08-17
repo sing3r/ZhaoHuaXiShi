@@ -314,19 +314,32 @@ $(HTTP_COOKIE)
 <img src=x on<!--esi-->error=alert(1)>
 ```
 
-④ 反射型（结合变量）
+④ Cookie 回显（配合 XSS 窃取 HttpOnly Cookie）
 
 ```html
 <!--esi $(HTTP_COOKIE) -->
 ```
 
-⑤ $url_decode 反射 XSS（HackTricks）
+**机制**：`<!--esi ... -->` 是 ESI 注释形式标记——引擎处理内容并移除定界符，`$(HTTP_COOKIE)` 替换为受害者自己的 Cookie 字符串，原样留在响应正文（HackTricks 原文注释："This will reflect the cookies in the response"）。本 payload 本身不执行脚本、也不外带数据，作用是**把 HttpOnly Cookie 变成 DOM 中的可见文本**；配合页面上已有的 XSS（或条目 ⑤）从 DOM 读取并外带，完成 HttpOnly 绕过。
+
+⑤ Reflect XSS（$url_decode，HackTricks）
 
 ```html
 <!--esi/$url_decode('"><svg/onload=prompt(1)>')/-->
 ```
 
-> **注意**：`$url_decode` 的嵌套层数决定可 URL 编码的次数（`<!--esi/$(HTTP_COOKIE)/$add_header('Content-Type','text/html')/$url_decode($url_decode('"><svg/onload=prompt(1)>'))/-->` 见 §5.3）。
+> hacktricks 原文注释：可将 `'"><svg/onload=prompt(1)>'` URL 编码后放入表达式，由 `$url_decode` 解码输出；整体 URL 编码后发送 HTTP 请求；检查 `url_decode` 嵌套层数即可知值可被 URL 编码的次数；亦可放置更复杂的 JS 以窃取 Cookie 或执行操作。
+>
+> **编码层数模型**（原文注释的展开）：
+>
+> ```text
+> 0. 目标构造：     <!--esi/$url_decode('%22%3E%3Csvg%2Fonload%3Dprompt(1)%3E')/-->   内层单层编码
+> 1. 请求形态：     %3C!--esi%2F%24url_decode('%2522%253E%253Csvg%252Fonload%253Dprompt(1)%253E')%2F--%3E   整体再编码
+> 2. 应用解码一次： 标记恢复原样，内层仍为单层编码
+> 3. ESI 引擎求值： $url_decode 解最后一层 → "><svg/onload=prompt(1)> 原样进入 DOM
+> ```
+>
+> 要点：标记靠应用的一次解码恢复原样，内层靠 `$url_decode` 在 ESI 求值阶段解最后一层；请求中 XSS 特征处于双层编码，常规只解码一次的 WAF 匹配不到 `<svg` 签名。嵌套 `$url_decode` 层数与内层编码层数对齐；字面 payload 内层未编码时 `$url_decode` 呈恒等，展示的只是构造形态。§5.3 的 `$url_decode($url_decode('"><svg/onload=prompt(1)>'))/-->` 即内层双重编码示例。
 
 #### 利用条件
 
