@@ -423,7 +423,7 @@ def execute(app: WSGIApplication) -> None:
             if hasattr(application_iter, "close"):
                 application_iter.close()
 ```
-4. Werkzeug 的默认错误处理会发送一个 200 OK 状态行（无 headers/body），这个「伪响应」会立即通过 TCP 发送给客户端。
+4. 响应头缓冲（`_headers_buffer`）**残留**：崩溃发生在响应头构建阶段——`send_response()`（状态行 + Server + Date）与 `send_header('Content-Type')` 已成功 append 进缓冲，崩在下一个头 `Set-Cookie` 的 latin-1 编码。`end_headers()` 未执行 → 缓冲**未 flush**。该缓冲是**连接级 handler 实例的持久属性**，跨请求存活；走私的第二个请求（HTTP/1.1）正常响应时把自己的响应头 append 进同一缓冲，其 `end_headers()` **一次性 flush 全部** → 客户端看到"200 OK 残头 + 404 头"粘合体（下方响应）——注意 200 OK 残头**没有** Set-Cookie、Content-Length 与结尾空行，直接拼接 404 状态行。
 ```http
 POST /api?action=color&color=x%ef%bf%bex&callback=xxxxxxxxxxxxxxxxx HTTP/1.1
 accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7
@@ -458,7 +458,6 @@ Server: Werkzeug/3.0.1 Python/3.11.9
 Date: Sun, 23 Mar 2025 11:41:34 GMT
 Content-Type: text/plain
 Content-Length: 17
-
 HTTP/1.1 404 NOT FOUND
 Server: Werkzeug/3.0.1 Python/3.11.9
 Date: Sun, 23 Mar 2025 11:43:34 GMT
@@ -502,6 +501,53 @@ Connection: close
 > **因此，更贴切的描述是：**
 > 
 > WSGI 服务器在解析完请求头后，会在 environ 里放置 wsgi.input 这个文件流对象。应用若需要请求体，就会调用该流的 read() 方法来获取，数据可能在服务器端做过部分或全部缓存，也可能是实时从网络读取，并不一定在创建 environ 的那一刻就已经完整“存储”到内存中。
+
+##### 精确机制补充（源码验证，Flask 3.0.1 + Werkzeug 3.0.1 本地复现）
+
+**崩溃点**（Werkzeug `write()` 发送响应头时，`http.server` 的 latin-1 严格编码）：
+
+```python
+# werkzeug/serving.py write() —— 首次 write 时发送响应头
+self.send_response(code, msg)          # http.server L362-365：
+#   send_response_only(200)  → buffer += "HTTP/1.1 200 OK\r\n"
+#   send_header('Server')    → buffer += Server 行
+#   send_header('Date')      → buffer += Date 行
+for key, value in headers_sent:        # L265
+    self.send_header(key, value)       # L266
+
+# http.server send_header L386-387：
+self._headers_buffer.append(
+    ("%s: %s\r\n" % (keyword, value)).encode('latin-1', 'strict'))
+#   ↑ Set-Cookie: color=...￿ → UnicodeEncodeError ← 崩溃
+#   （U+FFFF > 255，latin-1 无法编码；Content-Type 等前面的头已成功入缓冲）
+```
+
+**崩溃后 Werkzeug 做了什么**（并非"发送 200 OK 伪响应"）：
+
+```python
+# run_wsgi 的 except Exception（L365-385）
+if status_sent is not None and chunk_response:
+    self.close_connection = True       # chunk_response 崩溃时为 False，跳过
+try:
+    if status_sent is None:            # status_sent 崩溃时已被置位 → 不回滚
+        status_set = None
+        headers_set = None
+    execute(InternalServerError())     # 尝试发 500
+    # → InternalServerError 走 start_response → headers_set 非 None
+    #   → AssertionError("Headers already set") → 被 except Exception: pass 吞掉
+    # → 没有任何错误响应发出，_headers_buffer 原样残留
+```
+
+**`execute()` finally 的防走私读为何失效**（打点验证 `select -> 0 events`）：http.server 的 `rfile` 是 2KB 缓冲的 `BufferedReader`，`readline()` 读请求头时底层已把请求体**预读进 rfile 内部缓冲**——socket 内核缓冲为空，`selector.select(self.connection)` 检测不到数据 → while 循环跳过 → 走私 body 留在 rfile 中，被下一个 `handle_one_request` 当作请求行读取。
+
+**粘合响应的一次 flush**（打点：`flush_headers() 发送 301 字节` 仅一次）：`_headers_buffer` 从不清空（只有 `flush_headers()` 清空），崩溃残留 + 走私请求（HTTP/1.1）的响应头在同一个缓冲中，由走私请求的 `end_headers()` 一次写出。
+
+**残留缓冲的两种命运（取决于走私请求的协议版本）** —— 详见下方 [HTTP/0.9](#http09) 章节：
+
+| 走私请求版本 | `send_response`/`send_header`/`end_headers` | 残留 200 OK 缓冲 | 客户端收到 |
+|---|---|---|---|
+| HTTP/1.1 | 正常 append + flush | 与走私响应头**粘合发出** | 粘合头 + body |
+| HTTP/0.9 | 三个方法均被版本守卫跳过（见 HTTP/0.9 章节） | **封存至连接关闭销毁** | 纯 body |
 
    
 
@@ -750,6 +796,61 @@ A=
 版本 HTTP/0.9 是在 1.0 之前，仅使用 **GET** 动词，并且 **不响应头部**，只有主体。
 
 在 [**这篇文章**](https://mizu.re/post/twisty-python) 中，这被滥用通过请求走私和一个 **会回复用户输入的易受攻击端点** 来走私一个 HTTP/0.9 请求。响应中反射的参数包含一个 **伪造的 HTTP/1.1 响应（带有头部和主体）**，因此响应将包含有效的可执行 JS 代码，`Content-Type` 为 `text/html`。
+
+##### HTTP/0.9 的版本判定与三个响应头守卫（源码，Python 3.13）
+
+请求行只有 **2 个词**（`GET /path`，无协议版本）时，`parse_request()` 不设置 `request_version`——它保持 `default_request_version = "HTTP/0.9"`。而 http.server 的响应头路径**每一步**都有 HTTP/0.9 守卫：
+
+```python
+# Lib/http/server.py
+def send_response_only(self, code, message=None):   # L367
+    if self.request_version != 'HTTP/0.9':           # ← 守卫①：状态行不入缓冲
+        self._headers_buffer.append(...)
+
+def send_header(self, keyword, value):               # L381
+    if self.request_version != 'HTTP/0.9':           # ← 守卫②：头行不入缓冲
+        self._headers_buffer.append(...)
+
+    if keyword.lower() == 'connection':              # ← 守卫之外！
+        if value.lower() == 'close':
+            self.close_connection = True             # close 标记不受 HTTP/0.9 影响
+
+def end_headers(self):                               # L395
+    if self.request_version != 'HTTP/0.9':           # ← 守卫③：不 flush 缓冲
+        self._headers_buffer.append(b"\r\n")
+        self.flush_headers()                         # 唯一清空缓冲的路径
+
+def flush_headers(self):                             # L401
+    self.wfile.write(b"".join(self._headers_buffer))
+    self._headers_buffer = []                        # 清空
+```
+
+##### 守卫对残留缓冲的决定性影响（twisty-python 场景）
+
+在"通过破坏网络服务器触发请求走私"的崩溃场景中，请求一（`color=%EF%BF%BF`）崩溃后 `_headers_buffer` 残留着 `200 OK 状态行 + Server + Date + Content-Type`。走私请求的协议版本决定这批残留的最终命运：
+
+**HTTP/1.1 走私（如 `GET /smug HTTP/1.1`）→ 粘合头**：守卫①②③全部放行，走私响应的头 append 进**同一个残留缓冲**，其 `end_headers()` 一次性 flush 全部 → 客户端看到残缺的 200 OK 残头与走私响应头**无空行粘连**（文章 error-4 截图 / 上方"请求响应分割"示例即此形态）。
+
+**HTTP/0.9 走私（如 `GET /api?...callback=...`，2 词请求行）→ 纯 body**：守卫①②③全部拦截——状态行、Server/Date、Content-Type 等**均不入缓冲**，`end_headers()` **不 flush**（残留缓冲继续封存）。`Connection: close` 的 `close_connection` 设置在守卫之外仍生效 → 响应后连接关闭 → **残留的 200 OK 头随 handler 销毁，从未进入网络**。客户端收到的全部字节 = 响应 body = callback 参数内容。
+
+```python
+# werkzeug write() 对 HTTP/0.9 请求的执行轨迹
+self.send_response(200)          # 守卫① HTTP/0.9 → 跳过
+self.send_header('Server', ...)  # 守卫② → 跳过
+for key, value in headers_sent:  # Content-Type 等 → 全部跳过
+self.send_header("Connection", "close")   # 守卫②外：头行不 append，但 close_connection = True
+self.end_headers()               # 守卫③ → 跳过 flush（残留缓冲封存）
+if data:
+    self.wfile.write(data)       # ← 只写 body（callback 反射的伪造 HTTP/1.1 响应）
+self.wfile.flush()
+```
+
+##### 攻击者视角：HTTP/0.9 走私的双重精妙
+
+1. **无真实响应头** → 服务器只回显 body → 攻击者把伪造的 `HTTP/1.1 200 OK\r\nContent-Type: text/html...` 写在 body 开头，浏览器按 HTTP/1.1 解析 → `text/plain` 限制被绕过 → XSS；
+2. **不 flush 残留缓冲** → 浏览器不会先收到崩溃请求残留的残缺 200 OK（无 Content-Length、无终止空行）而陷入永久等待——若走私 HTTP/1.1，残留头会粘合发出，XSS 链即断裂（error-4 形态）。
+
+靶场实测（Hackropole twisty_python）：`POST /api?action=color&color=%EF%BF%BF` + body 走私 HTTP/0.9 请求 `GET /api?action=color&color=mizu&callback=<URL 编码的 HTTP_09>`，响应为**纯伪造响应**（`200 OK / text/html / <script>alert(1)</script>`），无任何请求一残留头——与上述守卫分析一致。
 
 ## 5.5 利用 HTTP 请求走私进行站内重定向
 
